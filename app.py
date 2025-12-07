@@ -12,6 +12,7 @@ from nltk.sentiment import SentimentIntensityAnalyzer
 from nltk import download as nltk_download
 
 from typing import List, Optional
+import math
 
 # ================== STREAMLIT CONFIG ==================
 
@@ -31,60 +32,93 @@ sia = SentimentIntensityAnalyzer()
 
 RAWG_BASE_URL = "https://api.rawg.io/api"
 
+# ================== RAWG FETCH IMPLEMENTATION (WITH PAGINATION) ==================
 
-# ================== DATA FETCHING FUNCTIONS ==================
-
-@st.cache_data(show_spinner=False)
-def fetch_trending_games(rawg_api_key: str, page_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
+def _fetch_trending_games_impl(rawg_api_key: str, total_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
     """
-    Fetch trending or popular games from RAWG.
+    Fetch trending or popular games from RAWG with pagination.
+    total_size is the total number of games desired (max capped internally for safety).
     ordering options: -added, -rating, -metacritic, -released, etc.
     """
     if not rawg_api_key:
         return pd.DataFrame()
 
-    endpoint = f"{RAWG_BASE_URL}/games"
-    params = {
-        "key": rawg_api_key,
-        "page_size": page_size,
-        "ordering": ordering,
-    }
+    # Safety cap to avoid extremely large loads
+    max_total = 1000
+    total_size = max(1, min(int(total_size), max_total))
 
-    resp = requests.get(endpoint, params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    games = data.get("results", [])
+    per_page = 40  # RAWG page_size max
+    n_pages = math.ceil(total_size / per_page)
 
-    records = []
-    for g in games:
-        records.append(
-            {
-                "id": g.get("id"),
-                "slug": g.get("slug"),
-                "name": g.get("name"),
-                "released": g.get("released"),
-                "rating": g.get("rating"),
-                "ratings_count": g.get("ratings_count"),
-                "metacritic": g.get("metacritic"),
-                "playtime": g.get("playtime"),
-                "suggestions_count": g.get("suggestions_count"),
-                "reviews_count": g.get("reviews_text_count"),
-                "genres": ", ".join([x["name"] for x in g.get("genres", [])]),
-                "platforms": ", ".join(
-                    [p["platform"]["name"] for p in (g.get("platforms") or [])]
-                )
-                if g.get("platforms")
-                else None,
-                "stores": ", ".join(
-                    [s["store"]["name"] for s in (g.get("stores") or [])]
-                )
-                if g.get("stores")
-                else None,
-            }
-        )
+    all_records = []
 
-    return pd.DataFrame.from_records(records)
+    for page in range(1, n_pages + 1):
+        page_size = min(per_page, total_size - len(all_records))
+        if page_size <= 0:
+            break
 
+        endpoint = f"{RAWG_BASE_URL}/games"
+        params = {
+            "key": rawg_api_key,
+            "page_size": page_size,
+            "ordering": ordering,
+            "page": page,
+        }
+
+        resp = requests.get(endpoint, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        games = data.get("results", [])
+
+        for g in games:
+            all_records.append(
+                {
+                    "id": g.get("id"),
+                    "slug": g.get("slug"),
+                    "name": g.get("name"),
+                    "released": g.get("released"),
+                    "rating": g.get("rating"),
+                    "ratings_count": g.get("ratings_count"),
+                    "metacritic": g.get("metacritic"),
+                    "playtime": g.get("playtime"),
+                    "suggestions_count": g.get("suggestions_count"),
+                    "reviews_count": g.get("reviews_text_count"),
+                    "genres": ", ".join([x["name"] for x in g.get("genres", [])]),
+                    "platforms": ", ".join(
+                        [p["platform"]["name"] for p in (g.get("platforms") or [])]
+                    )
+                    if g.get("platforms")
+                    else None,
+                    "stores": ", ".join(
+                        [s["store"]["name"] for s in (g.get("stores") or [])]
+                    )
+                    if g.get("stores")
+                    else None,
+                }
+            )
+
+        if len(all_records) >= total_size:
+            break
+
+    return pd.DataFrame.from_records(all_records)
+
+
+@st.cache_data(show_spinner=False)
+def fetch_trending_games_cached(rawg_api_key: str, total_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
+    """
+    Cached version for Market Overview.
+    """
+    return _fetch_trending_games_impl(rawg_api_key, total_size, ordering)
+
+
+def fetch_trending_games_live(rawg_api_key: str, total_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
+    """
+    Non-cached version for live snapshots (Trend Prediction).
+    """
+    return _fetch_trending_games_impl(rawg_api_key, total_size, ordering)
+
+
+# ================== STEAM HELPERS ==================
 
 def fetch_steam_reviews(app_id: str, num: int = 100) -> List[str]:
     """
@@ -460,10 +494,10 @@ def generate_competitor_insight(df_comp: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-# ================== SESSION STATE FOR SNAPSHOT DATA ==================
+# ================== SESSION STATE FOR SNAPSHOTS ==================
 
-if "snapshot_df" not in st.session_state:
-    st.session_state["snapshot_df"] = None
+if "trend_snapshots" not in st.session_state:
+    st.session_state["trend_snapshots"] = pd.DataFrame()
 
 
 # ================== SIDEBAR CONFIG ==================
@@ -480,7 +514,7 @@ page = st.sidebar.radio(
     "Select Module",
     [
         "1️⃣ Market Overview (RAWG)",
-        "2️⃣ Trend Prediction (Snapshots)",
+        "2️⃣ Trend Prediction (Snapshots from RAWG)",
         "3️⃣ Sentiment Analysis (Reviews)",
         "4️⃣ Competitor Analysis (Steam)",
     ],
@@ -494,7 +528,14 @@ if page == "1️⃣ Market Overview (RAWG)":
 
     col1, col2 = st.columns(2)
     with col1:
-        page_size = st.slider("Number of games (page_size)", 10, 80, 40, step=10)
+        total_size = st.number_input(
+            "Number of games to fetch (RAWG total size)",
+            min_value=1,
+            max_value=1000,
+            value=100,
+            step=10,
+            help="The app will handle pagination internally."
+        )
     with col2:
         ordering = st.selectbox(
             "Ordering",
@@ -506,8 +547,8 @@ if page == "1️⃣ Market Overview (RAWG)":
         st.warning("Please provide a RAWG API key in the sidebar.")
         st.stop()
 
-    with st.spinner("Fetching data from RAWG..."):
-        df_games = fetch_trending_games(rawg_api_key, page_size=page_size, ordering=ordering)
+    with st.spinner("Fetching data from RAWG (with pagination)..."):
+        df_games = fetch_trending_games_cached(rawg_api_key, total_size=int(total_size), ordering=ordering)
 
     if df_games.empty:
         st.error("No data returned. Check your API key or connection.")
@@ -603,40 +644,73 @@ if page == "1️⃣ Market Overview (RAWG)":
         st.markdown(insight_text)
 
 
-# ================== PAGE 2: TREND PREDICTION ==================
+# ================== PAGE 2: TREND PREDICTION (SNAPSHOTS FROM RAWG) ==================
 
-elif page == "2️⃣ Trend Prediction (Snapshots)":
-    st.title("📈 Trend Prediction from Snapshot Data")
+elif page == "2️⃣ Trend Prediction (Snapshots from RAWG)":
+    st.title("📈 Trend Prediction from RAWG Snapshots (No Upload)")
 
     st.markdown(
         """
-        This module uses **existing snapshot data** stored in session state.  
-        Steps:
-        1. Upload your CSV **once** (if not already stored).
-        2. Use the date filter to focus on a specific time window.
-        3. Select a game and metric, then view the trend and forecast.
+        This module uses **RAWG snapshots stored in session state**.
+        
+        Workflow:
+        1. Define the number of games and ordering.
+        2. Click **“Capture new snapshot from RAWG”** multiple times over time (e.g., different days or hours).
+        3. Use the date filter, pick a game and metric, then view trend + forecast.
         """
     )
 
-    uploaded = st.file_uploader("Upload snapshot CSV (only once is needed)", type=["csv"])
-
-    # If a new file is uploaded, overwrite the snapshot in session_state
-    if uploaded is not None:
-        df_rt_new = pd.read_csv(uploaded)
-        st.session_state["snapshot_df"] = df_rt_new
-
-    df_rt = st.session_state.get("snapshot_df")
-
-    if df_rt is None:
-        st.info("Please upload a snapshot CSV file to start.")
+    if not rawg_api_key:
+        st.warning("Please provide a RAWG API key in the sidebar.")
         st.stop()
 
-    st.write("Current snapshot dataset (from session):")
+    col1, col2 = st.columns(2)
+    with col1:
+        snap_size = st.number_input(
+            "Number of games per snapshot",
+            min_value=10,
+            max_value=500,
+            value=100,
+            step=10,
+            help="Each snapshot will fetch this many games from RAWG."
+        )
+    with col2:
+        snap_ordering = st.selectbox(
+            "Snapshot ordering",
+            options=["-added", "-rating", "-metacritic", "-released"],
+            help="Same as Market Overview ordering."
+        )
+
+    if st.button("Capture new snapshot from RAWG"):
+        with st.spinner("Capturing snapshot from RAWG..."):
+            df_snap = fetch_trending_games_live(rawg_api_key, total_size=int(snap_size), ordering=snap_ordering)
+        if df_snap.empty:
+            st.error("Snapshot fetch returned no data. Check API key or connection.")
+        else:
+            df_snap = df_snap.copy()
+            df_snap["snapshot_time_utc"] = datetime.utcnow()
+            if st.session_state["trend_snapshots"].empty:
+                st.session_state["trend_snapshots"] = df_snap
+            else:
+                st.session_state["trend_snapshots"] = pd.concat(
+                    [st.session_state["trend_snapshots"], df_snap],
+                    ignore_index=True
+                )
+            st.success(f"Snapshot captured with {len(df_snap)} rows at {df_snap['snapshot_time_utc'].iloc[0]} (UTC).")
+
+    df_rt = st.session_state["trend_snapshots"]
+
+    if df_rt.empty:
+        st.info("No snapshots captured yet. Use the button above to take the first snapshot.")
+        st.stop()
+
+    st.subheader("Current Snapshot Dataset (from session)")
+    st.write(f"Total rows: {len(df_rt)}, Distinct snapshots: {df_rt['snapshot_time_utc'].nunique()}")
     st.dataframe(df_rt.head())
 
     required_cols = {"name", "snapshot_time_utc", "rating", "ratings_count"}
     if not required_cols.issubset(df_rt.columns):
-        st.error(f"CSV must contain at least the following columns: {required_cols}")
+        st.error(f"Snapshot data is missing required columns: {required_cols}")
         st.stop()
 
     # ----- Date filter on snapshot_time_utc -----
@@ -861,12 +935,12 @@ elif page == "4️⃣ Competitor Analysis (Steam)":
                 st.dataframe(df_comp[["name", "metacritic_score", "recommendations", "genres"]])
 
                 # Scatter: price vs metacritic
-                if not df_price_plot.dropna(subset=["metacritic_score"]).empty:
+                if not df_price_plot.dropna(subset=["metaccritic_score"]).empty:
                     fig_sc, axsc = plt.subplots()
-                    dplot = df_price_plot.dropna(subset=["metacritic_score"])
-                    axsc.scatter(dplot["price_final"], dplot["metacritic_score"])
+                    dplot = df_price_plot.dropna(subset=["metaccritic_score"])
+                    axsc.scatter(dplot["price_final"], dplot["metaccritic_score"])
                     for _, row in dplot.iterrows():
-                        axsc.text(row["price_final"], row["metacritic_score"], row["name"], fontsize=8)
+                        axsc.text(row["price_final"], row["metaccritic_score"], row["name"], fontsize=8)
                     axsc.set_xlabel("Final Price")
                     axsc.set_ylabel("Metacritic Score")
                     axsc.set_title("Price vs Metacritic")
