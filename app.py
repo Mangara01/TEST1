@@ -384,7 +384,9 @@ def generate_sentiment_insight(df_sent: pd.DataFrame) -> str:
         )
 
     avg_compound = df_sent["compound"].mean()
-    lines.append(f"- The average VADER compound score is **{avg_compound:.3f}**, on a scale from -1 (very negative) to +1 (very positive).")
+    lines.append(
+        f"- The average VADER compound score is **{avg_compound:.3f}**, on a scale from -1 (very negative) to +1 (very positive)."
+    )
 
     return "\n".join(lines)
 
@@ -458,6 +460,12 @@ def generate_competitor_insight(df_comp: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+# ================== SESSION STATE FOR SNAPSHOT DATA ==================
+
+if "snapshot_df" not in st.session_state:
+    st.session_state["snapshot_df"] = None
+
+
 # ================== SIDEBAR CONFIG ==================
 
 st.sidebar.title("Configuration")
@@ -505,12 +513,46 @@ if page == "1️⃣ Market Overview (RAWG)":
         st.error("No data returned. Check your API key or connection.")
         st.stop()
 
-    st.subheader("Game Table")
-    st.dataframe(df_games)
+    # ----- Date filter by release date -----
+    df_games["released_dt"] = pd.to_datetime(df_games["released"], errors="coerce")
+    valid_dates = df_games["released_dt"].dropna()
 
-    # Top games by rating
-    st.subheader("Top 10 Games by Rating")
-    top_rating = df_games.sort_values("rating", ascending=False).head(10)
+    st.markdown("### Date Filter (by release date)")
+
+    if not valid_dates.empty:
+        min_date = valid_dates.min().date()
+        max_date = valid_dates.max().date()
+
+        start_date, end_date = st.date_input(
+            "Select release date range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+        )
+
+        if isinstance(start_date, datetime):
+            start_date = start_date.date()
+        if isinstance(end_date, datetime):
+            end_date = end_date.date()
+
+        mask = (df_games["released_dt"].dt.date >= start_date) & (
+            df_games["released_dt"].dt.date <= end_date
+        )
+        df_view = df_games.loc[mask].copy()
+    else:
+        st.info("No valid release dates found in the dataset; date filter is disabled.")
+        df_view = df_games.copy()
+
+    st.subheader("Game Table (Filtered)")
+    st.dataframe(df_view)
+
+    if df_view.empty:
+        st.warning("No games fall inside the selected date range.")
+        st.stop()
+
+    # Top games by rating (after date filter)
+    st.subheader("Top 10 Games by Rating (Filtered)")
+    top_rating = df_view.sort_values("rating", ascending=False).head(10)
     st.dataframe(top_rating[["name", "rating", "ratings_count", "metacritic", "genres", "platforms"]])
 
     # Rating bar chart
@@ -518,13 +560,13 @@ if page == "1️⃣ Market Overview (RAWG)":
     top_plot = top_rating.sort_values("rating", ascending=True)
     ax1.barh(top_plot["name"], top_plot["rating"])
     ax1.set_xlabel("Rating")
-    ax1.set_title("Top 10 Games by Rating")
+    ax1.set_title("Top 10 Games by Rating (Filtered)")
     plt.tight_layout()
     st.pyplot(fig1)
 
     # Genre distribution
-    st.subheader("Genre Distribution (Sample)")
-    genres_exploded = df_games["genres"].dropna().str.split(", ").explode()
+    st.subheader("Genre Distribution (Filtered Sample)")
+    genres_exploded = df_view["genres"].dropna().str.split(", ").explode()
     genre_counts = genres_exploded.value_counts().head(15)
     st.write(genre_counts)
 
@@ -532,14 +574,14 @@ if page == "1️⃣ Market Overview (RAWG)":
     ax2.bar(genre_counts.index, genre_counts.values)
     ax2.set_xlabel("Genre")
     ax2.set_ylabel("Count")
-    ax2.set_title("Top Genres in Current Snapshot")
+    ax2.set_title("Top Genres in Filtered Snapshot")
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
     st.pyplot(fig2)
 
     # Platform distribution
-    st.subheader("Platform Distribution")
-    plat_exploded = df_games["platforms"].dropna().str.split(", ").explode()
+    st.subheader("Platform Distribution (Filtered)")
+    plat_exploded = df_view["platforms"].dropna().str.split(", ").explode()
     plat_counts = plat_exploded.value_counts().head(15)
     st.write(plat_counts)
 
@@ -547,7 +589,7 @@ if page == "1️⃣ Market Overview (RAWG)":
     ax3.bar(plat_counts.index, plat_counts.values)
     ax3.set_xlabel("Platform")
     ax3.set_ylabel("Count")
-    ax3.set_title("Top Platforms in Current Snapshot")
+    ax3.set_title("Top Platforms in Filtered Snapshot")
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
     st.pyplot(fig3)
@@ -557,7 +599,7 @@ if page == "1️⃣ Market Overview (RAWG)":
     st.subheader("Automatic Market Insight (Rule-Based, No External AI)")
 
     if st.button("Generate Market Insight"):
-        insight_text = generate_market_overview_insight(df_games, top_rating, genre_counts, plat_counts)
+        insight_text = generate_market_overview_insight(df_view, top_rating, genre_counts, plat_counts)
         st.markdown(insight_text)
 
 
@@ -568,81 +610,126 @@ elif page == "2️⃣ Trend Prediction (Snapshots)":
 
     st.markdown(
         """
-        Upload a CSV file containing **snapshot data** for one or more games, with at least:
-        - `name` (game name)
-        - `snapshot_time_utc` (timestamp or date)
-        - `rating` and/or `ratings_count`
+        This module uses **existing snapshot data** stored in session state.  
+        Steps:
+        1. Upload your CSV **once** (if not already stored).
+        2. Use the date filter to focus on a specific time window.
+        3. Select a game and metric, then view the trend and forecast.
         """
     )
 
-    uploaded = st.file_uploader("Upload snapshot CSV", type=["csv"])
+    uploaded = st.file_uploader("Upload snapshot CSV (only once is needed)", type=["csv"])
 
+    # If a new file is uploaded, overwrite the snapshot in session_state
     if uploaded is not None:
-        df_rt = pd.read_csv(uploaded)
-        st.write("Preview of uploaded data:")
-        st.dataframe(df_rt.head())
+        df_rt_new = pd.read_csv(uploaded)
+        st.session_state["snapshot_df"] = df_rt_new
 
-        required_cols = {"name", "snapshot_time_utc", "rating", "ratings_count"}
-        if not required_cols.issubset(df_rt.columns):
-            st.error(f"CSV must contain at least the following columns: {required_cols}")
-        else:
-            game_names = sorted(df_rt["name"].unique())
-            game_choice = st.selectbox("Select Game", options=game_names)
-            metric = st.selectbox("Select Metric to Model", options=["rating", "ratings_count"])
+    df_rt = st.session_state.get("snapshot_df")
 
-            df_game = df_rt[df_rt["name"] == game_choice].copy()
-            df_game["snapshot_time_utc"] = pd.to_datetime(df_game["snapshot_time_utc"])
-            df_game = df_game.sort_values("snapshot_time_utc")
+    if df_rt is None:
+        st.info("Please upload a snapshot CSV file to start.")
+        st.stop()
 
-            st.subheader("Historical Data")
-            st.dataframe(df_game[["snapshot_time_utc", metric]])
+    st.write("Current snapshot dataset (from session):")
+    st.dataframe(df_rt.head())
 
-            # Plot historical series
-            fig_hist, axh = plt.subplots()
-            axh.plot(df_game["snapshot_time_utc"], df_game[metric], marker="o")
-            axh.set_xlabel("Time")
-            axh.set_ylabel(metric)
-            axh.set_title(f"Historical {metric} for {game_choice}")
-            plt.xticks(rotation=45, ha="right")
-            plt.tight_layout()
-            st.pyplot(fig_hist)
+    required_cols = {"name", "snapshot_time_utc", "rating", "ratings_count"}
+    if not required_cols.issubset(df_rt.columns):
+        st.error(f"CSV must contain at least the following columns: {required_cols}")
+        st.stop()
 
-            # Fit trend
-            model, df_future = fit_linear_trend(df_game, "snapshot_time_utc", metric)
-            if model is None:
-                st.warning("Not enough data points or time variation to fit a trend model.")
-            else:
-                st.subheader("Forecast (Next 5 Time Steps)")
-                st.dataframe(df_future)
+    # ----- Date filter on snapshot_time_utc -----
+    df_rt["snapshot_time_utc"] = pd.to_datetime(df_rt["snapshot_time_utc"], errors="coerce")
+    valid_dates = df_rt["snapshot_time_utc"].dropna()
 
-                # Combined plot
-                df_future_plot = df_future.rename(columns={"snapshot_time_utc": "time", f"pred_{metric}": metric})
-                df_future_plot["type"] = "forecast"
-                df_hist_plot = df_game[["snapshot_time_utc", metric]].rename(columns={"snapshot_time_utc": "time"})
-                df_hist_plot["type"] = "historical"
+    st.markdown("### Date Filter (by snapshot_time_utc)")
 
-                df_all_plot = pd.concat([df_hist_plot, df_future_plot], ignore_index=True)
+    if not valid_dates.empty:
+        min_date = valid_dates.min().date()
+        max_date = valid_dates.max().date()
 
-                fig_trend, axt = plt.subplots()
-                for t_type, dsub in df_all_plot.groupby("type"):
-                    axt.plot(dsub["time"], dsub[metric], marker="o", label=t_type.capitalize())
-                axt.set_xlabel("Time")
-                axt.set_ylabel(metric)
-                axt.set_title(f"Historical vs Forecast {metric} for {game_choice}")
-                axt.legend()
-                plt.xticks(rotation=45, ha="right")
-                plt.tight_layout()
-                st.pyplot(fig_trend)
+        start_date, end_date = st.date_input(
+            "Select snapshot date range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+        )
 
-                # Local insight
-                st.markdown("---")
-                st.subheader("Automatic Trend Insight (Rule-Based)")
+        if isinstance(start_date, datetime):
+            start_date = start_date.date()
+        if isinstance(end_date, datetime):
+            end_date = end_date.date()
 
-                if st.button("Generate Trend Insight"):
-                    insight_trend = generate_trend_insight(df_game, df_future, metric)
-                    st.markdown(insight_trend)
+        mask = (df_rt["snapshot_time_utc"].dt.date >= start_date) & (
+            df_rt["snapshot_time_utc"].dt.date <= end_date
+        )
+        df_rt_filtered = df_rt.loc[mask].copy()
     else:
-        st.info("Please upload a CSV file to perform trend prediction.")
+        st.info("No valid snapshot dates found in the dataset; date filter is disabled.")
+        df_rt_filtered = df_rt.copy()
+
+    if df_rt_filtered.empty:
+        st.warning("No snapshot records fall inside the selected date range.")
+        st.stop()
+
+    st.subheader("Filtered Snapshot Data (Used for Trend Modelling)")
+    st.dataframe(df_rt_filtered.head())
+
+    game_names = sorted(df_rt_filtered["name"].unique())
+    game_choice = st.selectbox("Select Game", options=game_names)
+    metric = st.selectbox("Select Metric to Model", options=["rating", "ratings_count"])
+
+    df_game = df_rt_filtered[df_rt_filtered["name"] == game_choice].copy()
+    df_game = df_game.sort_values("snapshot_time_utc")
+
+    st.subheader("Historical Data (Filtered)")
+    st.dataframe(df_game[["snapshot_time_utc", metric]])
+
+    # Plot historical series
+    fig_hist, axh = plt.subplots()
+    axh.plot(df_game["snapshot_time_utc"], df_game[metric], marker="o")
+    axh.set_xlabel("Time")
+    axh.set_ylabel(metric)
+    axh.set_title(f"Historical {metric} for {game_choice} (Filtered Range)")
+    plt.xticks(rotation=45, ha="right")
+    plt.tight_layout()
+    st.pyplot(fig_hist)
+
+    # Fit trend
+    model, df_future = fit_linear_trend(df_game, "snapshot_time_utc", metric)
+    if model is None:
+        st.warning("Not enough data points or time variation to fit a trend model.")
+    else:
+        st.subheader("Forecast (Next 5 Time Steps)")
+        st.dataframe(df_future)
+
+        # Combined plot
+        df_future_plot = df_future.rename(columns={"snapshot_time_utc": "time", f"pred_{metric}": metric})
+        df_future_plot["type"] = "forecast"
+        df_hist_plot = df_game[["snapshot_time_utc", metric]].rename(columns={"snapshot_time_utc": "time"})
+        df_hist_plot["type"] = "historical"
+
+        df_all_plot = pd.concat([df_hist_plot, df_future_plot], ignore_index=True)
+
+        fig_trend, axt = plt.subplots()
+        for t_type, dsub in df_all_plot.groupby("type"):
+            axt.plot(dsub["time"], dsub[metric], marker="o", label=t_type.capitalize())
+        axt.set_xlabel("Time")
+        axt.set_ylabel(metric)
+        axt.set_title(f"Historical vs Forecast {metric} for {game_choice}")
+        axt.legend()
+        plt.xticks(rotation=45, ha="right")
+        plt.tight_layout()
+        st.pyplot(fig_trend)
+
+        # Local insight
+        st.markdown("---")
+        st.subheader("Automatic Trend Insight (Rule-Based)")
+
+        if st.button("Generate Trend Insight"):
+            insight_trend = generate_trend_insight(df_game, df_future, metric)
+            st.markdown(insight_trend)
 
 
 # ================== PAGE 3: SENTIMENT ANALYSIS ==================
