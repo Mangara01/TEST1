@@ -41,15 +41,14 @@ def _fetch_trending_games_impl(
     dates_param: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Fetch trending or popular games from RAWG with pagination.
-    total_size is the total number of games desired (max capped internally for safety).
-    ordering options: -added, -rating, -metacritic, -released, etc.
-    dates_param: "YYYY-MM-DD,YYYY-MM-DD" for RAWG date range filter.
+    Fetch games from RAWG with pagination.
+    - total_size: total number of records desired (capped internally).
+    - ordering: -added, -rating, -metacritic, -released, etc.
+    - dates_param: "YYYY-MM-DD,YYYY-MM-DD" for RAWG date-range filter.
     """
     if not rawg_api_key:
         return pd.DataFrame()
 
-    # Safety cap to avoid extremely large loads
     max_total = 1000
     total_size = max(1, min(int(total_size), max_total))
 
@@ -71,7 +70,7 @@ def _fetch_trending_games_impl(
             "page": page,
         }
         if dates_param:
-            params["dates"] = dates_param  # RAWG date range filter
+            params["dates"] = dates_param
 
         resp = requests.get(endpoint, params=params, timeout=30)
         resp.raise_for_status()
@@ -116,37 +115,21 @@ def fetch_trending_games_cached(
     rawg_api_key: str,
     ordering: str,
     dates_param: Optional[str],
+    total_size: int = 400,
 ) -> pd.DataFrame:
     """
-    Cached version for Market Overview, driven by ordering + date range.
-    """
-    # Internally we cap total_size (e.g., 400 games max)
-    return _fetch_trending_games_impl(
-        rawg_api_key,
-        total_size=400,
-        ordering=ordering,
-        dates_param=dates_param,
-    )
-
-
-def fetch_trending_games_live(
-    rawg_api_key: str,
-    total_size: int = 100,
-    ordering: str = "-added",
-) -> pd.DataFrame:
-    """
-    Non-cached version for live snapshots (Trend Prediction),
-    still based on count (snapshot size) not release date.
+    Cached RAWG fetch used by Market & Trend, driven by:
+    - ordering
+    - dates_param (from global date filter)
     """
     return _fetch_trending_games_impl(
         rawg_api_key,
         total_size=total_size,
         ordering=ordering,
-        dates_param=None,
+        dates_param=dates_param,
     )
 
-
-# ================== STEAM HELPERS ==================
+# ================== STEAM HELPERS (DETAILS, REVIEWS, SEARCH BY NAME) ==================
 
 def fetch_steam_reviews(app_id: str, num: int = 100) -> List[str]:
     """
@@ -228,12 +211,40 @@ def collect_competitor_data(app_ids: List[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def search_steam_games(query: str, limit: int = 10) -> pd.DataFrame:
+    """
+    Search Steam store by game name keyword.
+    Uses Steam's (undocumented) store search endpoint.
+    """
+    url = "https://store.steampowered.com/api/storesearch/"
+    params = {
+        "term": query,
+        "l": "english",
+        "cc": "us",
+    }
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    items = data.get("items", [])
+
+    records = []
+    for it in items[:limit]:
+        records.append(
+            {
+                "appid": it.get("id"),
+                "name": it.get("name"),
+            }
+        )
+    return pd.DataFrame(records)
+
+
 # ================== CORE ANALYTICS FUNCTIONS ==================
 
 def fit_linear_trend(df: pd.DataFrame, time_col: str, target_col: str):
     """
     Fit a simple linear trend: target ~ time (as numeric index).
     Returns: model, df_future (5 future points).
+    Assumes time_col is datetime-like.
     """
     df = df.dropna(subset=[time_col, target_col]).copy()
     if df.empty:
@@ -253,7 +264,7 @@ def fit_linear_trend(df: pd.DataFrame, time_col: str, target_col: str):
     model = LinearRegression()
     model.fit(X, y)
 
-    # Create 5 future time points (1 day apart)
+    # Create 5 future time points (1 day apart from the last time)
     last_time = df[time_col].max()
     future_times = [last_time + timedelta(days=i) for i in range(1, 6)]
     future_idx = np.arange(len(df), len(df) + 5).reshape(-1, 1)
@@ -360,11 +371,15 @@ def generate_market_overview_insight(
     return "\n".join(lines) or "Not enough information to generate a market overview insight."
 
 
-def generate_trend_insight(df_game: pd.DataFrame, df_future: pd.DataFrame, metric: str) -> str:
-    if df_game.empty or df_future is None or df_future.empty:
+def generate_trend_insight(df_ts: pd.DataFrame, df_future: pd.DataFrame, metric_label: str) -> str:
+    """
+    Trend insight for aggregated time series (e.g., per-day or per-month).
+    df_ts has columns: [time_col, 'value'] (the metric).
+    """
+    if df_ts.empty or df_future is None or df_future.empty:
         return "Not enough data to generate a trend insight."
 
-    series_hist = df_game[metric].dropna()
+    series_hist = df_ts["value"].dropna()
     if series_hist.empty:
         return "Historical values for the selected metric are missing."
 
@@ -375,39 +390,31 @@ def generate_trend_insight(df_game: pd.DataFrame, df_future: pd.DataFrame, metri
     slope = delta / max(n_points - 1, 1)
 
     if slope > 0.01:
-        direction = "an upward (improving)"
+        direction = "an upward (increasing)"
     elif slope < -0.01:
-        direction = "a downward (declining)"
+        direction = "a downward (decreasing)"
     else:
         direction = "a relatively flat/stable"
 
     min_val = series_hist.min()
     max_val = series_hist.max()
 
-    future_vals = df_future[f"pred_{metric}"]
+    future_vals = df_future["pred_value"]
     future_min = future_vals.min()
     future_max = future_vals.max()
 
     lines = [
-        f"- Historically, **{metric}** started at **{start_val:.2f}** and moved to **{end_val:.2f}**, "
-        f"indicating {direction} trend over the observed period.",
+        f"- Over the selected period, **{metric_label}** started at **{start_val:.2f}** and moved to **{end_val:.2f}**, "
+        f"indicating {direction} trend.",
         f"- The observed range so far is **{min_val:.2f} – {max_val:.2f}**.",
-        f"- The simple linear forecast suggests future values in the range of approximately "
-        f"**{future_min:.2f} – {future_max:.2f}** for the next few time steps.",
+        f"- A simple linear extrapolation suggests future values around **{future_min:.2f} – {future_max:.2f}** "
+        "for the next few time steps.",
     ]
 
-    if metric == "rating":
-        lines.append(
-            "- Rating trends typically reflect perceived quality and stability. If the trend is declining, "
-            "it is worth reviewing recent patches, balance changes, or monetisation decisions that may be "
-            "impacting player satisfaction."
-        )
-    else:
-        lines.append(
-            "- Changes in ratings count can act as a proxy for visibility and engagement. Sustained growth may "
-            "indicate effective marketing, featuring, or word-of-mouth, while stagnation suggests the need "
-            "for refreshed campaigns or in-game events."
-        )
+    lines.append(
+        "- This trend should be interpreted directionally rather than as a precise forecast, but it can still help inform "
+        "timing, content strategy, or portfolio planning decisions."
+    )
 
     return "\n".join(lines)
 
@@ -522,13 +529,12 @@ def generate_competitor_insight(df_comp: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-# ================== SESSION STATE FOR SNAPSHOTS ==================
+# ================== SESSION STATE (FOR SEARCH RESULTS, ETC.) ==================
 
-if "trend_snapshots" not in st.session_state:
-    st.session_state["trend_snapshots"] = pd.DataFrame()
+if "sentiment_search_results" not in st.session_state:
+    st.session_state["sentiment_search_results"] = None
 
-
-# ================== SIDEBAR CONFIG ==================
+# ========== SIDEBAR CONFIG + GLOBAL DATE FILTER (SYNC FOR MARKET & TREND) ==========
 
 st.sidebar.title("Configuration")
 
@@ -542,11 +548,42 @@ page = st.sidebar.radio(
     "Select Module",
     [
         "1️⃣ Market Overview (RAWG)",
-        "2️⃣ Trend Prediction (Snapshots from RAWG)",
-        "3️⃣ Sentiment Analysis (Reviews)",
+        "2️⃣ Trend Analysis (RAWG, by release date)",
+        "3️⃣ Sentiment Analysis (Steam Reviews)",
         "4️⃣ Competitor Analysis (Steam)",
     ],
 )
+
+# Global release-date filter (used by Market & Trend)
+if "release_start_str" not in st.session_state:
+    st.session_state["release_start_str"] = ""
+if "release_end_str" not in st.session_state:
+    st.session_state["release_end_str"] = ""
+
+st.sidebar.markdown("### Global Release Date Filter (RAWG)")
+start_str = st.sidebar.text_input(
+    "Start release date (YYYY-MM-DD, optional)",
+    st.session_state["release_start_str"],
+)
+end_str = st.sidebar.text_input(
+    "End release date (YYYY-MM-DD, optional)",
+    st.session_state["release_end_str"],
+)
+
+st.session_state["release_start_str"] = start_str
+st.session_state["release_end_str"] = end_str
+
+dates_param = None
+if start_str and end_str:
+    try:
+        start_date = pd.to_datetime(start_str).date()
+        end_date = pd.to_datetime(end_str).date()
+        if start_date <= end_date:
+            dates_param = f"{start_date.isoformat()},{end_date.isoformat()}"
+        else:
+            st.sidebar.warning("Start date is after end date. RAWG date filter will be ignored.")
+    except Exception:
+        st.sidebar.warning("Invalid date format. Use YYYY-MM-DD. RAWG date filter will be ignored.")
 
 
 # ================== PAGE 1: MARKET OVERVIEW ==================
@@ -560,41 +597,31 @@ if page == "1️⃣ Market Overview (RAWG)":
         help="-added: newly added / popular\n-rating: highest rating\n-metacritic: critic score\n-released: latest releases",
     )
 
-    st.markdown("### Release Date Filter (used directly in RAWG API)")
-
-    start_str = st.text_input("Start release date (YYYY-MM-DD, optional)", "")
-    end_str = st.text_input("End release date (YYYY-MM-DD, optional)", "")
-
-    dates_param = None
-    # If both dates are provided and valid, we use them in RAWG query
-    if start_str and end_str:
-        try:
-            # just to validate format
-            start_date = pd.to_datetime(start_str).date()
-            end_date = pd.to_datetime(end_str).date()
-            if start_date <= end_date:
-                dates_param = f"{start_date.isoformat()},{end_date.isoformat()}"
-            else:
-                st.warning("Start date is after end date. RAWG date filter will be ignored.")
-        except Exception:
-            st.warning("Invalid date format. Use YYYY-MM-DD. RAWG date filter will be ignored.")
-
     if not rawg_api_key:
         st.warning("Please provide a RAWG API key in the sidebar.")
         st.stop()
 
-    with st.spinner("Fetching data from RAWG (filtered by dates if provided)..."):
-        df_games = fetch_trending_games_cached(rawg_api_key, ordering=ordering, dates_param=dates_param)
+    st.markdown(
+        f"Using global release-date filter: **{start_str or 'none'}** → **{end_str or 'none'}** "
+        "(applied at RAWG API level when valid)."
+    )
+
+    with st.spinner("Fetching data from RAWG (using global date filter if provided)..."):
+        df_games = fetch_trending_games_cached(
+            rawg_api_key,
+            ordering=ordering,
+            dates_param=dates_param,
+            total_size=400,
+        )
 
     if df_games.empty:
         st.error("No data returned. Check your API key, connection, or try adjusting the date range.")
         st.stop()
 
-    # Prepare datetime column for local filtering/visualisation
     df_games["released_dt"] = pd.to_datetime(df_games["released"], errors="coerce")
     df_view = df_games.copy()
 
-    # Optionally also apply client-side filter if user provided start/end (works even when RAWG filter is ignored)
+    # Optional local date filter (same dates as sidebar)
     try:
         if start_str:
             start_date_local = pd.to_datetime(start_str).date()
@@ -605,14 +632,14 @@ if page == "1️⃣ Market Overview (RAWG)":
     except Exception:
         st.warning("Local release-date filter failed due to invalid format. Visuals use unfiltered dates.")
 
-    st.subheader("Game Table (Filtered)")
+    st.subheader("Game Table (Filtered by global release-date filter)")
     st.dataframe(df_view)
 
     if df_view.empty:
         st.warning("No games match the selected date range (after local filtering).")
         st.stop()
 
-    # Top games by rating (after filters)
+    # Top games by rating
     st.subheader("Top 10 Games by Rating (Filtered)")
     top_rating = df_view.sort_values("rating", ascending=False).head(10)
     st.dataframe(top_rating[["name", "rating", "ratings_count", "metacritic", "genres", "platforms"]])
@@ -665,20 +692,15 @@ if page == "1️⃣ Market Overview (RAWG)":
         st.markdown(insight_text)
 
 
-# ================== PAGE 2: TREND PREDICTION (SNAPSHOTS FROM RAWG) ==================
+# ================== PAGE 2: TREND ANALYSIS (RAWG, BY RELEASE DATE) ==================
 
-elif page == "2️⃣ Trend Prediction (Snapshots from RAWG)":
-    st.title("📈 Trend Prediction from RAWG Snapshots (No Upload)")
+elif page == "2️⃣ Trend Analysis (RAWG, by release date)":
+    st.title("📈 Trend Analysis - RAWG (Release-Date Based)")
 
     st.markdown(
         """
-        This module uses **RAWG snapshots stored in session state**.
-        
-        Workflow:
-        1. Define the number of games and ordering.
-        2. Click **“Capture new snapshot from RAWG”** multiple times over time (e.g., different days or hours).
-        3. Use the **user-input date filter** to focus on a time window.
-        4. Select a game and metric, then view trend + forecast.
+        This module analyses **market-level trends** over the selected release date range.
+        It uses the **same global release-date filter** as the Market Overview.
         """
     )
 
@@ -686,153 +708,181 @@ elif page == "2️⃣ Trend Prediction (Snapshots from RAWG)":
         st.warning("Please provide a RAWG API key in the sidebar.")
         st.stop()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        snap_size = st.number_input(
-            "Number of games per snapshot",
-            min_value=10,
-            max_value=500,
-            value=100,
-            step=10,
-            help="Each snapshot will fetch this many games from RAWG."
+    trend_ordering = st.selectbox(
+        "Ordering (for trend data fetch)",
+        options=["-released", "-added", "-rating", "-metacritic"],
+        help="Usually '-released' is a good default for time-based analysis.",
+    )
+
+    st.markdown(
+        f"Using global release-date filter: **{start_str or 'none'}** → **{end_str or 'none'}** "
+        "(applied at RAWG API level when valid)."
+    )
+
+    with st.spinner("Fetching data from RAWG for trend analysis..."):
+        df_trend = fetch_trending_games_cached(
+            rawg_api_key,
+            ordering=trend_ordering,
+            dates_param=dates_param,
+            total_size=600,  # more rows internally; user doesn't see this limit
         )
-    with col2:
-        snap_ordering = st.selectbox(
-            "Snapshot ordering",
-            options=["-added", "-rating", "-metacritic", "-released"],
-            help="Same as Market Overview ordering."
-        )
 
-    if st.button("Capture new snapshot from RAWG"):
-        with st.spinner("Capturing snapshot from RAWG..."):
-            df_snap = fetch_trending_games_live(rawg_api_key, total_size=int(snap_size), ordering=snap_ordering)
-        if df_snap.empty:
-            st.error("Snapshot fetch returned no data. Check API key or connection.")
-        else:
-            df_snap = df_snap.copy()
-            df_snap["snapshot_time_utc"] = datetime.utcnow()
-            if st.session_state["trend_snapshots"].empty:
-                st.session_state["trend_snapshots"] = df_snap
-            else:
-                st.session_state["trend_snapshots"] = pd.concat(
-                    [st.session_state["trend_snapshots"], df_snap],
-                    ignore_index=True
-                )
-            st.success(f"Snapshot captured with {len(df_snap)} rows at {df_snap['snapshot_time_utc'].iloc[0]} (UTC).")
-
-    df_rt = st.session_state["trend_snapshots"]
-
-    if df_rt.empty:
-        st.info("No snapshots captured yet. Use the button above to take the first snapshot.")
+    if df_trend.empty:
+        st.error("No trend data returned. Try adjusting the date range.")
         st.stop()
 
-    st.subheader("Current Snapshot Dataset (from session)")
-    st.write(f"Total rows: {len(df_rt)}, Distinct snapshots: {df_rt['snapshot_time_utc'].nunique()}")
-    st.dataframe(df_rt.head())
+    df_trend["released_dt"] = pd.to_datetime(df_trend["released"], errors="coerce")
+    df_trend = df_trend.dropna(subset=["released_dt"])
 
-    required_cols = {"name", "snapshot_time_utc", "rating", "ratings_count"}
-    if not required_cols.issubset(df_rt.columns):
-        st.error(f"Snapshot data is missing required columns: {required_cols}")
-        st.stop()
-
-    # Ensure datetime
-    df_rt["snapshot_time_utc"] = pd.to_datetime(df_rt["snapshot_time_utc"], errors="coerce")
-
-    st.markdown("### Date Filter (by snapshot_time_utc - user input)")
-
-    start_str_snap = st.text_input("Start snapshot date (YYYY-MM-DD, optional)", "")
-    end_str_snap = st.text_input("End snapshot date (YYYY-MM-DD, optional)", "")
-
-    df_rt_filtered = df_rt.copy()
-
+    # Apply same local date filter
     try:
-        if start_str_snap:
-            start_date_snap = pd.to_datetime(start_str_snap).date()
-            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date >= start_date_snap]
-        if end_str_snap:
-            end_date_snap = pd.to_datetime(end_str_snap).date()
-            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date <= end_date_snap]
+        if start_str:
+            start_date_local = pd.to_datetime(start_str).date()
+            df_trend = df_trend[df_trend["released_dt"].dt.date >= start_date_local]
+        if end_str:
+            end_date_local = pd.to_datetime(end_str).date()
+            df_trend = df_trend[df_trend["released_dt"].dt.date <= end_date_local]
     except Exception:
-        st.warning("Invalid date format for snapshot filter. Use YYYY-MM-DD. Filter ignored.")
-        df_rt_filtered = df_rt.copy()
+        st.warning("Local release-date filter failed due to invalid format. Using all fetched rows.")
 
-    if df_rt_filtered.empty:
-        st.warning("No snapshot records fall inside the selected user-defined date range.")
+    if df_trend.empty:
+        st.warning("No games remain after applying the global date filter for trend analysis.")
         st.stop()
 
-    st.subheader("Filtered Snapshot Data (Used for Trend Modelling)")
-    st.dataframe(df_rt_filtered.head())
+    st.subheader("Sample of Data Used for Trend Analysis")
+    st.dataframe(df_trend.head())
 
-    game_names = sorted(df_rt_filtered["name"].unique())
-    game_choice = st.selectbox("Select Game", options=game_names)
-    metric = st.selectbox("Select Metric to Model", options=["rating", "ratings_count"])
+    time_granularity = st.selectbox(
+        "Time granularity",
+        options=["Daily", "Monthly"],
+    )
 
-    df_game = df_rt_filtered[df_rt_filtered["name"] == game_choice].copy()
-    df_game = df_game.sort_values("snapshot_time_utc")
+    metric_choice = st.selectbox(
+        "Trend metric",
+        options=[
+            "Number of releases",
+            "Average rating",
+            "Average Metacritic score",
+            "Average ratings_count",
+        ],
+    )
 
-    st.subheader("Historical Data (Filtered)")
-    st.dataframe(df_game[["snapshot_time_utc", metric]])
+    # Build time bins
+    if time_granularity == "Daily":
+        df_trend["time_bin"] = df_trend["released_dt"].dt.floor("D")
+    else:  # Monthly
+        df_trend["time_bin"] = df_trend["released_dt"].dt.to_period("M").dt.to_timestamp()
 
-    # Plot historical series
-    fig_hist, axh = plt.subplots()
-    axh.plot(df_game["snapshot_time_utc"], df_game[metric], marker="o")
-    axh.set_xlabel("Time")
-    axh.set_ylabel(metric)
-    axh.set_title(f"Historical {metric} for {game_choice} (Filtered Range)")
+    # Aggregate
+    if metric_choice == "Number of releases":
+        df_ts = (
+            df_trend.groupby("time_bin")["id"]
+            .count()
+            .rename("value")
+            .reset_index()
+        )
+        metric_label = "number of releases"
+    elif metric_choice == "Average rating":
+        df_ts = (
+            df_trend.groupby("time_bin")["rating"]
+            .mean()
+            .rename("value")
+            .reset_index()
+        )
+        metric_label = "average rating of releases"
+    elif metric_choice == "Average Metacritic score":
+        df_ts = (
+            df_trend.groupby("time_bin")["metacritic"]
+            .mean()
+            .rename("value")
+            .reset_index()
+        )
+        metric_label = "average Metacritic score of releases"
+    else:  # Average ratings_count
+        df_ts = (
+            df_trend.groupby("time_bin")["ratings_count"]
+            .mean()
+            .rename("value")
+            .reset_index()
+        )
+        metric_label = "average ratings_count of releases"
+
+    df_ts = df_ts.dropna(subset=["value"])
+    if df_ts.empty:
+        st.warning("No valid data for the selected metric/time granularity.")
+        st.stop()
+
+    st.subheader("Aggregated Time Series")
+    st.dataframe(df_ts)
+
+    # Plot historical trend
+    fig_t, axt = plt.subplots()
+    axt.plot(df_ts["time_bin"], df_ts["value"], marker="o")
+    axt.set_xlabel("Time")
+    axt.set_ylabel(metric_choice)
+    axt.set_title(f"{metric_choice} over time ({time_granularity})")
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
-    st.pyplot(fig_hist)
+    st.pyplot(fig_t)
 
-    # Fit trend
-    model, df_future = fit_linear_trend(df_game, "snapshot_time_utc", metric)
+    # Fit trend on aggregated series
+    df_for_model = df_ts.rename(columns={"time_bin": "time"})
+    model_input = df_for_model[["time", "value"]].copy()
+
+    model, df_future = fit_linear_trend(model_input, "time", "value")
     if model is None:
-        st.warning("Not enough data points or time variation to fit a trend model.")
+        st.warning("Not enough variation in time to fit a linear trend.")
     else:
         st.subheader("Forecast (Next 5 Time Steps)")
+        df_future = df_future.rename(columns={"time": "time"})
+        df_future = df_future.rename(columns={"pred_value": "pred_value"}) if "pred_value" in df_future.columns else df_future
+        # Ensure we have consistent naming
+        df_future = df_future.rename(columns={df_future.columns[1]: "pred_value"})
         st.dataframe(df_future)
 
-        # Combined plot
-        df_future_plot = df_future.rename(columns={"snapshot_time_utc": "time", f"pred_{metric}": metric})
+        # Combine for plotting
+        df_future_plot = df_future.rename(columns={"time": "time_bin"})
         df_future_plot["type"] = "forecast"
-        df_hist_plot = df_game[["snapshot_time_utc", metric]].rename(columns={"snapshot_time_utc": "time"})
+        df_hist_plot = df_ts.copy()
         df_hist_plot["type"] = "historical"
 
-        df_all_plot = pd.concat([df_hist_plot, df_future_plot], ignore_index=True)
+        df_all_plot = pd.concat([df_hist_plot, df_future_plot.rename(columns={"pred_value": "value"})], ignore_index=True)
 
-        fig_trend, axt = plt.subplots()
+        fig_tf, axtf = plt.subplots()
         for t_type, dsub in df_all_plot.groupby("type"):
-            axt.plot(dsub["time"], dsub[metric], marker="o", label=t_type.capitalize())
-        axt.set_xlabel("Time")
-        axt.set_ylabel(metric)
-        axt.set_title(f"Historical vs Forecast {metric} for {game_choice}")
-        axt.legend()
+            axtf.plot(dsub["time_bin"], dsub["value"], marker="o", label=t_type.capitalize())
+        axtf.set_xlabel("Time")
+        axtf.set_ylabel(metric_choice)
+        axtf.set_title(f"{metric_choice}: Historical vs Forecast")
+        axtf.legend()
         plt.xticks(rotation=45, ha="right")
         plt.tight_layout()
-        st.pyplot(fig_trend)
+        st.pyplot(fig_tf)
 
         # Local insight
         st.markdown("---")
         st.subheader("Automatic Trend Insight (Rule-Based)")
 
         if st.button("Generate Trend Insight"):
-            insight_trend = generate_trend_insight(df_game, df_future, metric)
+            insight_trend = generate_trend_insight(df_ts, df_future, metric_label)
             st.markdown(insight_trend)
 
 
-# ================== PAGE 3: SENTIMENT ANALYSIS ==================
+# ================== PAGE 3: SENTIMENT ANALYSIS (REVIEWS) ==================
 
-elif page == "3️⃣ Sentiment Analysis (Reviews)":
+elif page == "3️⃣ Sentiment Analysis (Steam Reviews)":
     st.title("🗣️ Sentiment Analysis of Game Reviews")
 
     st.markdown(
         """
-        Choose how you want to provide reviews:
-        - **Manual Input**: paste multiple reviews, one per line.
-        - **Steam App ID**: fetch recent reviews from Steam for a specific app.
+        Provide reviews via:
+        - **Manual input** (one review per line), or
+        - **Steam App ID**, or
+        - **Search by game name** (the app will look up matching Steam titles).
         """
     )
 
-    mode = st.radio("Review Source", ["Manual Input", "Steam App ID"])
+    mode = st.radio("Review Source", ["Manual Input", "Steam App ID", "Search by Game Name"])
 
     reviews_texts: List[str] = []
 
@@ -840,7 +890,8 @@ elif page == "3️⃣ Sentiment Analysis (Reviews)":
         txt = st.text_area("Enter reviews (one per line)", height=200)
         if st.button("Analyse Manual Reviews"):
             reviews_texts = [line for line in txt.split("\n") if line.strip()]
-    else:
+
+    elif mode == "Steam App ID":
         app_id = st.text_input(
             "Steam App ID",
             help="Example: 570 for Dota 2, 730 for CS2. Check the Steam store URL: /app/<appid>/",
@@ -856,6 +907,51 @@ elif page == "3️⃣ Sentiment Analysis (Reviews)":
                     except Exception as e:
                         st.error(f"Failed to fetch reviews: {e}")
 
+    else:  # Search by Game Name
+        if "sentiment_search_results" not in st.session_state:
+            st.session_state["sentiment_search_results"] = None
+
+        query = st.text_input("Game name keyword for Steam search")
+        num_reviews = st.slider("Number of reviews to fetch", 10, 100, 50, step=10)
+
+        if st.button("Search game on Steam"):
+            if not query.strip():
+                st.warning("Please enter a game name keyword.")
+            else:
+                with st.spinner("Searching Steam store..."):
+                    try:
+                        df_search = search_steam_games(query.strip(), limit=10)
+                        if df_search.empty:
+                            st.warning("No games found for that keyword.")
+                        else:
+                            st.session_state["sentiment_search_results"] = df_search
+                    except Exception as e:
+                        st.error(f"Steam search failed: {e}")
+
+        df_search = st.session_state.get("sentiment_search_results")
+        selected_app_id = None
+
+        if df_search is not None and not df_search.empty:
+            st.subheader("Search Results")
+            st.dataframe(df_search)
+
+            options = [
+                f"{row['name']} (AppID: {row['appid']})"
+                for _, row in df_search.iterrows()
+            ]
+            choice = st.selectbox("Select a game", options)
+            if choice:
+                idx = options.index(choice)
+                selected_app_id = str(df_search.iloc[idx]["appid"])
+
+        if selected_app_id and st.button("Fetch & Analyse Reviews for Selected Game"):
+            with st.spinner("Fetching reviews from Steam..."):
+                try:
+                    reviews_texts = fetch_steam_reviews(selected_app_id, num=num_reviews)
+                except Exception as e:
+                    st.error(f"Failed to fetch reviews: {e}")
+
+    # Once we have reviews_texts, run sentiment
     if reviews_texts:
         with st.spinner("Running sentiment analysis..."):
             df_sent = analyze_sentiment(reviews_texts)
@@ -880,47 +976,78 @@ elif page == "3️⃣ Sentiment Analysis (Reviews)":
             sent_insight = generate_sentiment_insight(df_sent)
             st.markdown(sent_insight)
     else:
-        st.info("Provide reviews (manual or via Steam) and run the analysis to see results.")
+        st.info("Provide reviews (manual, by App ID, or by name search) and run the analysis to see results.")
 
 
-# ================== PAGE 4: COMPETITOR ANALYSIS ==================
+# ================== PAGE 4: COMPETITOR ANALYSIS (STEAM) ==================
 
 elif page == "4️⃣ Competitor Analysis (Steam)":
     st.title("🏁 Steam Competitor Analysis")
 
     st.markdown(
         """
-        This module uses Steam's appdetails endpoint to gather basic competitor data:
-        - Pricing and discount information
+        This module uses Steam's appdetails endpoint to gather competitor data:
+        - Pricing and discounts
         - Metacritic score (if available)
         - Player recommendations
         - Genre and category tags
 
-        Please use this responsibly and respect Steam's Terms of Service.
+        You can provide:
+        - **Steam App IDs directly**, and/or
+        - **Game names** (the app will search Steam and pick matches).
         """
     )
 
     base_app_id = st.text_input("Base Game Steam App ID (optional)")
     comp_app_ids_str = st.text_area(
-        "Competitor Steam App IDs (comma separated)",
+        "Competitor Steam App IDs (comma separated, optional)",
         help="Example: 570,730,440",
+    )
+    name_keywords_str = st.text_area(
+        "Competitor game names (comma separated, optional)",
+        help="Example: dota, counter strike, team fortress",
     )
 
     if st.button("Fetch Competitor Data"):
-        app_ids = []
-        if base_app_id:
-            app_ids.append(base_app_id)
+        app_ids: List[str] = []
+
+        # Direct App IDs
+        if base_app_id.strip():
+            app_ids.append(base_app_id.strip())
         if comp_app_ids_str.strip():
             app_ids += [x.strip() for x in comp_app_ids_str.split(",") if x.strip()]
 
+        # Name-based search
+        name_to_appid = []
+        if name_keywords_str.strip():
+            for kw in [x.strip() for x in name_keywords_str.split(",") if x.strip()]:
+                try:
+                    df_search = search_steam_games(kw, limit=1)
+                    if not df_search.empty:
+                        appid = str(df_search.iloc[0]["appid"])
+                        app_ids.append(appid)
+                        name_to_appid.append(
+                            {
+                                "keyword": kw,
+                                "matched_name": df_search.iloc[0]["name"],
+                                "appid": appid,
+                            }
+                        )
+                except Exception as e:
+                    st.warning(f"Search failed for keyword '{kw}': {e}")
+
         if not app_ids:
-            st.warning("Please specify at least one Steam App ID.")
+            st.warning("Please specify at least one Steam App ID or game name.")
         else:
             with st.spinner("Fetching competitor data from Steam..."):
                 df_comp = collect_competitor_data(app_ids)
 
+            if name_to_appid:
+                st.subheader("Name Search → AppID Mapping Used")
+                st.dataframe(pd.DataFrame(name_to_appid))
+
             if df_comp.empty:
-                st.error("No competitor data retrieved. Check App IDs or connection.")
+                st.error("No competitor data retrieved. Check App IDs / keywords or connection.")
             else:
                 st.subheader("Competitor Data (Steam AppDetails)")
                 st.dataframe(df_comp)
@@ -948,11 +1075,11 @@ elif page == "4️⃣ Competitor Analysis (Steam)":
                 st.dataframe(df_comp[["name", "metacritic_score", "recommendations", "genres"]])
 
                 # Scatter: price vs metacritic
-                if not df_price_plot.dropna(subset=["metacritic_score"]).empty:
+                df_scatter = df_price_plot.dropna(subset=["metacritic_score"])
+                if not df_scatter.empty:
                     fig_sc, axsc = plt.subplots()
-                    dplot = df_price_plot.dropna(subset=["metacritic_score"])
-                    axsc.scatter(dplot["price_final"], dplot["metacritic_score"])
-                    for _, row in dplot.iterrows():
+                    axsc.scatter(df_scatter["price_final"], df_scatter["metacritic_score"])
+                    for _, row in df_scatter.iterrows():
                         axsc.text(row["price_final"], row["metacritic_score"], row["name"], fontsize=8)
                     axsc.set_xlabel("Final Price")
                     axsc.set_ylabel("Metacritic Score")
