@@ -13,8 +13,11 @@ import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 from nltk import download as nltk_download
 
+from typing import List, Optional
+from openai import OpenAI
 
-# ============ SETUP ============
+
+# ============ SETUP STREAMLIT ============
 
 st.set_page_config(
     page_title="Game Market Intelligence",
@@ -31,7 +34,7 @@ sia = SentimentIntensityAnalyzer()
 RAWG_BASE_URL = "https://api.rawg.io/api"
 
 
-# ============ HELPER FUNCTIONS ============
+# ============ HELPER FUNCTIONS (DATA) ============
 
 @st.cache_data(show_spinner=False)
 def fetch_trending_games(rawg_api_key: str, page_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
@@ -121,7 +124,7 @@ def fit_linear_trend(df: pd.DataFrame, time_col: str, target_col: str):
     model = LinearRegression()
     model.fit(X_scaled, y)
 
-    # Buat horizon prediksi 5 titik ke depan (1 hari step)
+    # Horizon prediksi 5 titik ke depan (1 hari step)
     last_time = df[time_col].max()
     future_times = [last_time + timedelta(days=i * 1) for i in range(1, 6)]
     future_numeric = np.array([(ft - t0).total_seconds() for ft in future_times]).reshape(-1, 1)
@@ -137,7 +140,7 @@ def fit_linear_trend(df: pd.DataFrame, time_col: str, target_col: str):
     return model, df_future
 
 
-def analyze_sentiment(texts: list[str]) -> pd.DataFrame:
+def analyze_sentiment(texts: List[str]) -> pd.DataFrame:
     rows = []
     for t in texts:
         t_clean = t.strip()
@@ -164,7 +167,7 @@ def analyze_sentiment(texts: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def fetch_steam_reviews(app_id: str, num: int = 100) -> list[str]:
+def fetch_steam_reviews(app_id: str, num: int = 100) -> List[str]:
     """
     Ambil review Steam (teks) via endpoint JSON resmi.
     Catatan: jangan spam, hormati rate limit & ToS Steam.
@@ -186,10 +189,10 @@ def fetch_steam_reviews(app_id: str, num: int = 100) -> list[str]:
     return [r.get("review", "") for r in reviews]
 
 
-def fetch_steam_appdetails(app_id: str) -> dict | None:
+def fetch_steam_appdetails(app_id: str) -> Optional[dict]:
     """
     Ambil detail game dari Steam (harga, genre, dll) via appdetails.
-    Wishlist TIDAK tersedia dari API publik; bisa isi manual jika punya.
+    Wishlist TIDAK tersedia dari API publik; kolom wishlist_estimate jadi placeholder.
     """
     url = "https://store.steampowered.com/api/appdetails"
     params = {"appids": app_id}
@@ -231,7 +234,7 @@ def fetch_steam_appdetails(app_id: str) -> dict | None:
     return info
 
 
-def collect_competitor_data(app_ids: list[str]) -> pd.DataFrame:
+def collect_competitor_data(app_ids: List[str]) -> pd.DataFrame:
     rows = []
     for aid in app_ids:
         aid = aid.strip()
@@ -246,6 +249,37 @@ def collect_competitor_data(app_ids: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ============ HELPER: GENERATIVE AI INSIGHT ============
+
+def generate_ai_insight(openai_api_key: str, system_prompt: str, user_prompt: str) -> str:
+    """
+    Panggil model OpenAI untuk bikin insight otomatis.
+    """
+    if not openai_api_key:
+        return "⚠️ OpenAI API key belum diisi di sidebar."
+
+    try:
+        client = OpenAI(api_key=openai_api_key)
+        resp = client.chat.completions.create(
+            model="gpt-4.1-mini",  # bisa diganti model lain
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            max_tokens=800,
+            temperature=0.3,
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        return f"❌ Gagal memanggil model: {e}"
+
+
 # ============ SIDEBAR CONFIG ============
 
 st.sidebar.title("⚙️ Konfigurasi")
@@ -254,6 +288,12 @@ rawg_api_key = st.sidebar.text_input(
     "RAWG API Key",
     type="password",
     help="Daftar di https://rawg.io/ lalu buat API key, masukkan di sini.",
+)
+
+openai_api_key = st.sidebar.text_input(
+    "OpenAI API Key (opsional untuk AI Insight)",
+    type="password",
+    help="Dibutuhkan untuk fitur insight otomatis (Generative AI).",
 )
 
 page = st.sidebar.radio(
@@ -345,6 +385,56 @@ if page == "1️⃣ Market Overview (RAWG)":
     )
     st.pyplot(fig3)
 
+    # === AI Insight ===
+    st.markdown("---")
+    st.subheader("🔮 Insight Otomatis (Generative AI)")
+
+    if not openai_api_key:
+        st.info("Masukkan OpenAI API key di sidebar untuk mengaktifkan insight otomatis.")
+    else:
+        extra_instruction = st.text_area(
+            "Instruksi tambahan untuk AI (opsional)",
+            value="Fokus ke peluang pasar dan segmen yang menarik untuk game baru.",
+        )
+
+        if st.button("Generate Insight Market Overview"):
+            # ringkas context untuk dikirim ke model
+            context_str = f"""
+Top 10 game (name, rating, ratings_count, genres, platforms):
+{top_rating[['name','rating','ratings_count','genres','platforms']].to_string(index=False)}
+
+Top genres (genre: count):
+{genre_counts.to_string()}
+
+Top platforms (platform: count):
+{plat_counts.to_string()}
+"""
+
+            system_prompt = (
+                "Kamu adalah analis pasar game yang sangat berpengalaman. "
+                "Berikan insight dalam bahasa Indonesia, singkat tapi tajam, "
+                "tentang tren market dari data yang diberikan."
+            )
+
+            user_prompt = f"""
+Ini adalah ringkasan data market (game trending/populer):
+
+{context_str}
+
+Tugasmu:
+- Jelaskan pola utama (genre mana yang kuat, platform mana yang dominan).
+- Sebutkan minimal 2 peluang atau gap yang bisa dimanfaatkan untuk game baru.
+- Gunakan bahasa yang mudah dipahami, bullet point jika perlu.
+
+Instruksi tambahan dari user:
+{extra_instruction}
+"""
+
+            with st.spinner("AI sedang menganalisis..."):
+                insight = generate_ai_insight(openai_api_key, system_prompt, user_prompt)
+
+            st.markdown(insight)
+
 
 # ============ PAGE 2: PREDIKSI TREN (AI) ============
 
@@ -357,6 +447,7 @@ elif page == "2️⃣ Prediksi Tren (AI)":
         - Upload file CSV hasil **snapshot berkala** (misalnya dari script polling RAWG di Colab).
         - Pilih game tertentu.
         - Model tren **rating** atau **ratings_count** terhadap waktu.
+        - Gunakan Generative AI untuk menjelaskan tren & implikasinya.
         """
     )
 
@@ -370,7 +461,6 @@ elif page == "2️⃣ Prediksi Tren (AI)":
         st.write("Contoh data:")
         st.dataframe(df_rt.head())
 
-        # Validasi kolom
         required_cols = {"name", "snapshot_time_utc", "rating", "ratings_count"}
         if not required_cols.issubset(df_rt.columns):
             st.error(f"CSV minimal harus punya kolom: {required_cols}")
@@ -436,6 +526,51 @@ elif page == "2️⃣ Prediksi Tren (AI)":
                 plt.xticks(rotation=45, ha="right")
                 plt.tight_layout()
                 st.pyplot(fig_trend)
+
+                # === AI Insight untuk tren ===
+                st.markdown("---")
+                st.subheader("🔮 Insight Otomatis dari Tren")
+
+                if not openai_api_key:
+                    st.info("Masukkan OpenAI API key di sidebar untuk insight otomatis.")
+                else:
+                    extra_instruction = st.text_area(
+                        "Instruksi tambahan (opsional)",
+                        value="Fokus ke implikasi business & live-ops (event, promo, balancing).",
+                    )
+
+                    if st.button("Generate Insight Tren"):
+                        hist_str = df_game[["snapshot_time_utc", metric]].tail(10).to_string(index=False)
+                        future_str = df_future.to_string(index=False)
+
+                        system_prompt = (
+                            "Kamu adalah analis data game. "
+                            "Jelaskan tren dan rekomendasi strategi live-ops / marketing."
+                        )
+
+                        user_prompt = f"""
+Game: {game_choice}
+Metric yang dianalisis: {metric}
+
+Data historis (tail 10):
+{hist_str}
+
+Prediksi 5 titik ke depan:
+{future_str}
+
+Tolong jelaskan:
+- Apakah trennya cenderung naik/turun/stagnan?
+- Apa kemungkinan penyebab (secara hipotesis, misal event, update, kompetitor)?
+- Rekomendasi langkah praktis untuk product / marketing / live-ops.
+
+Instruksi tambahan:
+{extra_instruction}
+"""
+
+                        with st.spinner("AI sedang menganalisis tren..."):
+                            insight_trend = generate_ai_insight(openai_api_key, system_prompt, user_prompt)
+
+                        st.markdown(insight_trend)
     else:
         st.info("Upload CSV dulu supaya bisa bangun model tren.")
 
@@ -450,6 +585,8 @@ elif page == "3️⃣ Sentiment Analysis Review":
         Pilihan input:
         1. **Manual**: ketik / paste banyak review (1 review per baris).
         2. **Scrape Steam**: masukkan Steam App ID (misalnya 730 untuk CS2).
+
+        Setelah sentiment dihitung, kamu bisa minta **AI Insight** untuk merangkum pain point & strength utama.
         """
     )
 
@@ -458,7 +595,7 @@ elif page == "3️⃣ Sentiment Analysis Review":
         ["Manual Input", "Steam (App ID)"],
     )
 
-    reviews_texts: list[str] = []
+    reviews_texts: List[str] = []
 
     if mode == "Manual Input":
         txt = st.text_area(
@@ -515,6 +652,62 @@ elif page == "3️⃣ Sentiment Analysis Review":
                 for _, row in sample.iterrows():
                     st.write(f"- {row['text']}")
 
+        # === AI Insight untuk sentiment ===
+        st.markdown("---")
+        st.subheader("🔮 Insight Otomatis dari Sentiment Review")
+
+        if not openai_api_key:
+            st.info("Masukkan OpenAI API key di sidebar untuk insight otomatis.")
+        else:
+            extra_instruction = st.text_area(
+                "Instruksi tambahan (opsional)",
+                value="Fokus pada rekomendasi perbaikan fitur & monetisasi.",
+            )
+
+            if st.button("Generate Insight Sentiment"):
+                # Ringkas beberapa contoh review per label
+                pos_examples = df_sent[df_sent["label"] == "positive"]["text"].head(5).tolist()
+                neg_examples = df_sent[df_sent["label"] == "negative"]["text"].head(5).tolist()
+                neu_examples = df_sent[df_sent["label"] == "neutral"]["text"].head(5).tolist()
+
+                summary_str = f"""
+Distribusi sentiment (label: count):
+{counts.to_string()}
+
+Contoh review positive:
+- " + "\n- ".join(pos_examples) if pos_examples else "Tidak ada"
+
+Contoh review negative:
+- " + "\n- ".join(neg_examples) if neg_examples else "Tidak ada"
+
+Contoh review neutral:
+- " + "\n- ".join(neu_examples) if neu_examples else "Tidak ada"
+"""
+
+                system_prompt = (
+                    "Kamu adalah analis UX/game designer yang membaca review pemain. "
+                    "Tugasmu merangkum feedback utama dan memberi rekomendasi perbaikan produk."
+                )
+
+                user_prompt = f"""
+Berikut ringkasan sentiment dan contoh review pemain:
+
+{summary_str}
+
+Tolong:
+- Rangkum 3-5 poin kekuatan utama game (berdasarkan review).
+- Rangkum 3-5 pain point / keluhan utama.
+- Berikan rekomendasi konkret yang bisa dilakukan tim game (fitur, balancing, monetisasi, komunikasi).
+
+Instruksi tambahan:
+{extra_instruction}
+"""
+
+                with st.spinner("AI sedang menganalisis review..."):
+                    insight_sent = generate_ai_insight(openai_api_key, system_prompt, user_prompt)
+
+                st.markdown(insight_sent)
+
 
 # ============ PAGE 4: SCRAPER & KOMPETITOR (STEAM) ============
 
@@ -527,10 +720,10 @@ elif page == "4️⃣ Scraper & Analisis Kompetitor (Steam)":
 
         - Ambil info game (harga, discount, genre, metacritic, rekomendasi).
         - Bandingkan beberapa game sebagai kompetitor.
+        - Gunakan Generative AI untuk insight positioning & diferensiasi.
 
-        ⚠️ **Catatan penting**:
-        - Selalu cek & patuhi Terms of Service dari platform (Steam, dll).
-        - Jangan melakukan scraping agresif / berlebihan.
+        ⚠️ Catatan:
+        - Selalu patuhi Terms of Service dari Steam dan jangan scraping berlebihan.
         """
     )
 
@@ -612,3 +805,50 @@ elif page == "4️⃣ Scraper & Analisis Kompetitor (Steam)":
                     - Gabungkan ini dengan sentiment review (Halaman 3) untuk insight yang lebih kaya.
                     """
                 )
+
+                # === AI Insight kompetitor ===
+                st.markdown("---")
+                st.subheader("🔮 Insight Otomatis Analisis Kompetitor")
+
+                if not openai_api_key:
+                    st.info("Masukkan OpenAI API key di sidebar untuk insight otomatis.")
+                else:
+                    extra_instruction = st.text_area(
+                        "Instruksi tambahan (opsional)",
+                        value="Fokus ke positioning produk baru dan diferensiasi fitur/monetisasi.",
+                    )
+
+                    if st.button("Generate Insight Kompetitor"):
+                        # ringkas data kompetitor
+                        comp_brief_cols = [
+                            "name", "is_free", "price_final_cent", "currency",
+                            "discount_percent", "metacritic_score", "recommendations",
+                            "genres", "categories"
+                        ]
+                        df_brief = df_comp[comp_brief_cols]
+                        brief_str = df_brief.to_string(index=False)
+
+                        system_prompt = (
+                            "Kamu adalah analis bisnis game yang melihat data kompetitor di Steam. "
+                            "Berikan analisis kompetitif dan rekomendasi positioning."
+                        )
+
+                        user_prompt = f"""
+Berikut data ringkas game + kompetitor:
+
+{brief_str}
+
+Tolong:
+- Kelompokkan game berdasarkan tipe bisnis: F2P vs premium.
+- Komentari perbedaan harga, diskon, dan kualitas (metacritic / recommendations).
+- Identifikasi celah pasar atau strategi diferensiasi yang bisa diambil (mis: niche genre, pricing, bundling, live-ops).
+- Jawab dalam bahasa Indonesia, terstruktur dengan bullet point.
+
+Instruksi tambahan:
+{extra_instruction}
+"""
+
+                        with st.spinner("AI sedang menganalisis kompetitor..."):
+                            insight_comp = generate_ai_insight(openai_api_key, system_prompt, user_prompt)
+
+                        st.markdown(insight_comp)
