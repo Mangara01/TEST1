@@ -32,13 +32,19 @@ sia = SentimentIntensityAnalyzer()
 
 RAWG_BASE_URL = "https://api.rawg.io/api"
 
-# ================== RAWG FETCH IMPLEMENTATION (WITH PAGINATION) ==================
+# ================== RAWG FETCH IMPLEMENTATION (WITH PAGINATION + DATES) ==================
 
-def _fetch_trending_games_impl(rawg_api_key: str, total_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
+def _fetch_trending_games_impl(
+    rawg_api_key: str,
+    total_size: int = 400,
+    ordering: str = "-added",
+    dates_param: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Fetch trending or popular games from RAWG with pagination.
     total_size is the total number of games desired (max capped internally for safety).
     ordering options: -added, -rating, -metacritic, -released, etc.
+    dates_param: "YYYY-MM-DD,YYYY-MM-DD" for RAWG date range filter.
     """
     if not rawg_api_key:
         return pd.DataFrame()
@@ -47,7 +53,7 @@ def _fetch_trending_games_impl(rawg_api_key: str, total_size: int = 40, ordering
     max_total = 1000
     total_size = max(1, min(int(total_size), max_total))
 
-    per_page = 40  # RAWG page_size max
+    per_page = 40  # RAWG maximum page_size
     n_pages = math.ceil(total_size / per_page)
 
     all_records = []
@@ -64,6 +70,8 @@ def _fetch_trending_games_impl(rawg_api_key: str, total_size: int = 40, ordering
             "ordering": ordering,
             "page": page,
         }
+        if dates_param:
+            params["dates"] = dates_param  # RAWG date range filter
 
         resp = requests.get(endpoint, params=params, timeout=30)
         resp.raise_for_status()
@@ -104,18 +112,38 @@ def _fetch_trending_games_impl(rawg_api_key: str, total_size: int = 40, ordering
 
 
 @st.cache_data(show_spinner=False)
-def fetch_trending_games_cached(rawg_api_key: str, total_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
+def fetch_trending_games_cached(
+    rawg_api_key: str,
+    ordering: str,
+    dates_param: Optional[str],
+) -> pd.DataFrame:
     """
-    Cached version for Market Overview.
+    Cached version for Market Overview, driven by ordering + date range.
     """
-    return _fetch_trending_games_impl(rawg_api_key, total_size, ordering)
+    # Internally we cap total_size (e.g., 400 games max)
+    return _fetch_trending_games_impl(
+        rawg_api_key,
+        total_size=400,
+        ordering=ordering,
+        dates_param=dates_param,
+    )
 
 
-def fetch_trending_games_live(rawg_api_key: str, total_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
+def fetch_trending_games_live(
+    rawg_api_key: str,
+    total_size: int = 100,
+    ordering: str = "-added",
+) -> pd.DataFrame:
     """
-    Non-cached version for live snapshots (Trend Prediction).
+    Non-cached version for live snapshots (Trend Prediction),
+    still based on count (snapshot size) not release date.
     """
-    return _fetch_trending_games_impl(rawg_api_key, total_size, ordering)
+    return _fetch_trending_games_impl(
+        rawg_api_key,
+        total_size=total_size,
+        ordering=ordering,
+        dates_param=None,
+    )
 
 
 # ================== STEAM HELPERS ==================
@@ -526,63 +554,65 @@ page = st.sidebar.radio(
 if page == "1️⃣ Market Overview (RAWG)":
     st.title("📊 Market Overview - RAWG Trending/Popular Games")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        total_size = st.number_input(
-            "Number of games to fetch (RAWG total size)",
-            min_value=1,
-            max_value=1000,
-            value=100,
-            step=10,
-            help="The app will handle pagination internally."
-        )
-    with col2:
-        ordering = st.selectbox(
-            "Ordering",
-            options=["-added", "-rating", "-metacritic", "-released"],
-            help="-added: newly added / popular\n-rating: highest rating\n-metacritic: critic score\n-released: latest releases",
-        )
+    ordering = st.selectbox(
+        "Ordering",
+        options=["-added", "-rating", "-metacritic", "-released"],
+        help="-added: newly added / popular\n-rating: highest rating\n-metacritic: critic score\n-released: latest releases",
+    )
+
+    st.markdown("### Release Date Filter (used directly in RAWG API)")
+
+    start_str = st.text_input("Start release date (YYYY-MM-DD, optional)", "")
+    end_str = st.text_input("End release date (YYYY-MM-DD, optional)", "")
+
+    dates_param = None
+    # If both dates are provided and valid, we use them in RAWG query
+    if start_str and end_str:
+        try:
+            # just to validate format
+            start_date = pd.to_datetime(start_str).date()
+            end_date = pd.to_datetime(end_str).date()
+            if start_date <= end_date:
+                dates_param = f"{start_date.isoformat()},{end_date.isoformat()}"
+            else:
+                st.warning("Start date is after end date. RAWG date filter will be ignored.")
+        except Exception:
+            st.warning("Invalid date format. Use YYYY-MM-DD. RAWG date filter will be ignored.")
 
     if not rawg_api_key:
         st.warning("Please provide a RAWG API key in the sidebar.")
         st.stop()
 
-    with st.spinner("Fetching data from RAWG (with pagination)..."):
-        df_games = fetch_trending_games_cached(rawg_api_key, total_size=int(total_size), ordering=ordering)
+    with st.spinner("Fetching data from RAWG (filtered by dates if provided)..."):
+        df_games = fetch_trending_games_cached(rawg_api_key, ordering=ordering, dates_param=dates_param)
 
     if df_games.empty:
-        st.error("No data returned. Check your API key or connection.")
+        st.error("No data returned. Check your API key, connection, or try adjusting the date range.")
         st.stop()
 
-    # Prepare datetime column
+    # Prepare datetime column for local filtering/visualisation
     df_games["released_dt"] = pd.to_datetime(df_games["released"], errors="coerce")
-
-    st.markdown("### Date Filter (by release date - user input)")
-
-    start_str = st.text_input("Start release date (YYYY-MM-DD, optional)", "")
-    end_str = st.text_input("End release date (YYYY-MM-DD, optional)", "")
-
     df_view = df_games.copy()
 
-    # Apply user-driven filter if provided
+    # Optionally also apply client-side filter if user provided start/end (works even when RAWG filter is ignored)
     try:
         if start_str:
-            start_date = pd.to_datetime(start_str).date()
-            df_view = df_view[df_view["released_dt"].dt.date >= start_date]
+            start_date_local = pd.to_datetime(start_str).date()
+            df_view = df_view[df_view["released_dt"].dt.date >= start_date_local]
         if end_str:
-            end_date = pd.to_datetime(end_str).date()
-            df_view = df_view[df_view["released_dt"].dt.date <= end_date]
+            end_date_local = pd.to_datetime(end_str).date()
+            df_view = df_view[df_view["released_dt"].dt.date <= end_date_local]
     except Exception:
-        st.warning("Invalid date format for release date filter. Use YYYY-MM-DD. Filter ignored.")
+        st.warning("Local release-date filter failed due to invalid format. Visuals use unfiltered dates.")
 
     st.subheader("Game Table (Filtered)")
     st.dataframe(df_view)
 
     if df_view.empty:
-        st.warning("No games match the selected date range (or filters).")
+        st.warning("No games match the selected date range (after local filtering).")
         st.stop()
 
-    # Top games by rating (after date filter)
+    # Top games by rating (after filters)
     st.subheader("Top 10 Games by Rating (Filtered)")
     top_rating = df_view.sort_values("rating", ascending=False).head(10)
     st.dataframe(top_rating[["name", "rating", "ratings_count", "metacritic", "genres", "platforms"]])
@@ -710,18 +740,18 @@ elif page == "2️⃣ Trend Prediction (Snapshots from RAWG)":
 
     st.markdown("### Date Filter (by snapshot_time_utc - user input)")
 
-    start_str = st.text_input("Start snapshot date (YYYY-MM-DD, optional)", "")
-    end_str = st.text_input("End snapshot date (YYYY-MM-DD, optional)", "")
+    start_str_snap = st.text_input("Start snapshot date (YYYY-MM-DD, optional)", "")
+    end_str_snap = st.text_input("End snapshot date (YYYY-MM-DD, optional)", "")
 
     df_rt_filtered = df_rt.copy()
 
     try:
-        if start_str:
-            start_date = pd.to_datetime(start_str).date()
-            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date >= start_date]
-        if end_str:
-            end_date = pd.to_datetime(end_str).date()
-            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date <= end_date]
+        if start_str_snap:
+            start_date_snap = pd.to_datetime(start_str_snap).date()
+            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date >= start_date_snap]
+        if end_str_snap:
+            end_date_snap = pd.to_datetime(end_str_snap).date()
+            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date <= end_date_snap]
     except Exception:
         st.warning("Invalid date format for snapshot filter. Use YYYY-MM-DD. Filter ignored.")
         df_rt_filtered = df_rt.copy()
