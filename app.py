@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from io import StringIO
 import matplotlib.pyplot as plt
 
 from sklearn.linear_model import LinearRegression
@@ -12,16 +11,111 @@ from sklearn.preprocessing import StandardScaler
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 from nltk import download as nltk_download
+import time
 
-
-# ============ SETUP ============
+# ============ BASIC CONFIG & GLOBALS ============
 
 st.set_page_config(
     page_title="Game Market Intelligence",
     layout="wide",
+    page_icon="🎮",
 )
 
-# Pastikan VADER tersedia
+# --- Custom CSS untuk UI lebih beranimasi & modern ---
+def inject_custom_css():
+    st.markdown(
+        """
+        <style>
+        /* Background gradient animated */
+        .stApp {
+            background: linear-gradient(120deg, #0f172a, #1e293b, #020617);
+            background-size: 400% 400%;
+            animation: gradientMove 18s ease infinite;
+            color: #e5e7eb;
+        }
+
+        @keyframes gradientMove {
+            0% {background-position: 0% 50%;}
+            50% {background-position: 100% 50%;}
+            100% {background-position: 0% 50%;}
+        }
+
+        /* Title glow */
+        .glow-title h1 {
+            text-shadow: 0 0 12px rgba(56, 189, 248, 0.8);
+        }
+
+        /* Card-like containers */
+        .glass-card {
+            background: rgba(15, 23, 42, 0.7);
+            border-radius: 16px;
+            padding: 1.2rem 1.4rem;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            backdrop-filter: blur(8px);
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.65);
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border 0.2s ease;
+        }
+        .glass-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 24px 55px rgba(15, 23, 42, 0.9);
+            border-color: rgba(56, 189, 248, 0.55);
+        }
+
+        /* Metric style */
+        [data-testid="stMetric"] {
+            background: linear-gradient(135deg, rgba(15,23,42,0.9), rgba(30,64,175,0.9));
+            padding: 1rem 1.2rem;
+            border-radius: 12px;
+            border: 1px solid rgba(96,165,250,0.6);
+            box-shadow: 0 12px 30px rgba(15,23,42,0.8);
+        }
+
+        /* Sidebar styling */
+        section[data-testid="stSidebar"] {
+            background: rgba(15, 23, 42, 0.92);
+            border-right: 1px solid rgba(148, 163, 184, 0.35);
+        }
+
+        /* Remove default dataframe background */
+        .blank .dataframe {
+            background: transparent !important;
+        }
+
+        /* Buttons */
+        .stButton>button {
+            border-radius: 999px;
+            border: 1px solid rgba(56,189,248,0.5);
+            background: linear-gradient(135deg, #0f172a, #1d4ed8);
+            color: #e5e7eb;
+            transition: all 0.2s ease;
+        }
+        .stButton>button:hover {
+            border-color: rgba(56,189,248,0.9);
+            transform: translateY(-1px) scale(1.01);
+            box-shadow: 0 14px 30px rgba(30,64,175,0.9);
+        }
+
+        /* Tabs */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.5rem;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            padding: 0.4rem 1.0rem;
+            background: rgba(15,23,42,0.65);
+        }
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(135deg, #1d4ed8, #0ea5e9);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_custom_css()
+
+# ====== NLTK VADER SETUP ======
 try:
     _ = SentimentIntensityAnalyzer()
 except Exception:
@@ -37,7 +131,6 @@ RAWG_BASE_URL = "https://api.rawg.io/api"
 def fetch_trending_games(rawg_api_key: str, page_size: int = 40, ordering: str = "-added") -> pd.DataFrame:
     """
     Ambil game populer/trending dari RAWG API.
-    ordering bisa: -added, -rating, -metacritic, -released, dll.
     """
     if not rawg_api_key:
         return pd.DataFrame()
@@ -88,19 +181,17 @@ def fetch_trending_games(rawg_api_key: str, page_size: int = 40, ordering: str =
 def plot_bar(x, y, title: str, xlabel: str = "", ylabel: str = ""):
     fig, ax = plt.subplots()
     ax.bar(x, y)
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    plt.xticks(rotation=45, ha="right")
-    plt.tight_layout()
+    ax.set_title(title, color="#e5e7eb")
+    ax.set_xlabel(xlabel, color="#e5e7eb")
+    ax.set_ylabel(ylabel, color="#e5e7eb")
+    plt.xticks(rotation=45, ha="right", color="#e5e7eb")
+    ax.tick_params(colors="#e5e7eb")
+    fig.patch.set_alpha(0.0)
+    ax.set_facecolor("none")
     return fig
 
 
 def fit_linear_trend(df: pd.DataFrame, time_col: str, target_col: str):
-    """
-    Fit regresi linear sederhana: target ~ time (as numeric).
-    Return: model, df_future
-    """
     df = df.dropna(subset=[time_col, target_col]).copy()
     if df.empty or df[time_col].nunique() < 2:
         return None, None
@@ -108,7 +199,6 @@ def fit_linear_trend(df: pd.DataFrame, time_col: str, target_col: str):
     df[time_col] = pd.to_datetime(df[time_col])
     df = df.sort_values(time_col)
 
-    # Numeric time (seconds since first)
     t0 = df[time_col].min()
     df["t_numeric"] = (df[time_col] - t0).dt.total_seconds()
 
@@ -121,7 +211,6 @@ def fit_linear_trend(df: pd.DataFrame, time_col: str, target_col: str):
     model = LinearRegression()
     model.fit(X_scaled, y)
 
-    # Buat horizon prediksi 5 titik ke depan (1 hari step)
     last_time = df[time_col].max()
     future_times = [last_time + timedelta(days=i * 1) for i in range(1, 6)]
     future_numeric = np.array([(ft - t0).total_seconds() for ft in future_times]).reshape(-1, 1)
@@ -165,10 +254,6 @@ def analyze_sentiment(texts: list[str]) -> pd.DataFrame:
 
 
 def fetch_steam_reviews(app_id: str, num: int = 100) -> list[str]:
-    """
-    Ambil review Steam (teks) via endpoint JSON resmi.
-    Catatan: jangan spam, hormati rate limit & ToS Steam.
-    """
     url = f"https://store.steampowered.com/appreviews/{app_id}"
     params = {
         "json": 1,
@@ -181,16 +266,11 @@ def fetch_steam_reviews(app_id: str, num: int = 100) -> list[str]:
     resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-
     reviews = data.get("reviews", [])[:num]
     return [r.get("review", "") for r in reviews]
 
 
 def fetch_steam_appdetails(app_id: str) -> dict | None:
-    """
-    Ambil detail game dari Steam (harga, genre, dll) via appdetails.
-    Wishlist TIDAK tersedia dari API publik; bisa isi manual jika punya.
-    """
     url = "https://store.steampowered.com/api/appdetails"
     params = {"appids": app_id}
     resp = requests.get(url, params=params, timeout=30)
@@ -207,7 +287,7 @@ def fetch_steam_appdetails(app_id: str) -> dict | None:
     currency = None
     discount = None
     if price_info:
-        final_price = price_info.get("final")  # dalam cent
+        final_price = price_info.get("final")
         currency = price_info.get("currency")
         discount = price_info.get("discount_percent")
 
@@ -225,7 +305,6 @@ def fetch_steam_appdetails(app_id: str) -> dict | None:
         "recommendations": (d.get("recommendations") or {}).get("total"),
         "genres": genres,
         "categories": categories,
-        # wishlist tidak tersedia; column placeholder
         "wishlist_estimate": None,
     }
     return info
@@ -250,10 +329,21 @@ def collect_competitor_data(app_ids: list[str]) -> pd.DataFrame:
 
 st.sidebar.title("⚙️ Konfigurasi")
 
+st.sidebar.markdown(
+    """
+    <div style="font-size: 0.9rem; opacity: 0.8;">
+    🎮 <b>Game Market Intelligence</b><br>
+    Real-time market overview, AI trend prediction,<br>
+    sentiment review, dan kompetitor Steam.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 rawg_api_key = st.sidebar.text_input(
     "RAWG API Key",
     type="password",
-    help="Daftar di https://rawg.io/ lalu buat API key, masukkan di sini.",
+    help="Daftar di https://rawg.io lalu buat API key, masukkan di sini.",
 )
 
 page = st.sidebar.radio(
@@ -270,7 +360,32 @@ page = st.sidebar.radio(
 # ============ PAGE 1: MARKET OVERVIEW ============
 
 if page == "1️⃣ Market Overview (RAWG)":
-    st.title("📊 Market Overview - Game Trending / Populer")
+    st.markdown('<div class="glow-title"><h1>📊 Game Market Overview</h1></div>', unsafe_allow_html=True)
+
+    col_top1, col_top2 = st.columns([2, 1])
+    with col_top1:
+        st.markdown(
+            """
+            <div class="glass-card">
+            <h3>🎮 Snapshot Game Trending / Populer</h3>
+            <p style="font-size:0.9rem; opacity:0.8;">
+            Pantau genre, rating, platform dominan, dan struktur pasar game real-time dari RAWG API.
+            </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_top2:
+        st.markdown(
+            """
+            <div class="glass-card">
+            <b>Tips:</b><br>
+            - Coba ganti <code>ordering</code> ke <i>-rating</i> atau <i>-metacritic</i>.<br>
+            - Pakai ini untuk cari niche / genre yang lagi naik daun.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -291,73 +406,98 @@ if page == "1️⃣ Market Overview (RAWG)":
         st.warning("Masukkan RAWG API key di sidebar dulu.")
         st.stop()
 
+    # Animasi progress kecil saat fetch
+    progress = st.progress(0, text="Menghubungkan ke RAWG API...")
+    time.sleep(0.3)
+    progress.progress(30, text="Mengambil daftar game trending...")
     with st.spinner("Mengambil data dari RAWG..."):
         df_games = fetch_trending_games(rawg_api_key, page_size=page_size, ordering=ordering)
+    progress.progress(100, text="Done ✓")
+    time.sleep(0.2)
+    progress.empty()
 
     if df_games.empty:
         st.error("Tidak ada data. Cek API key atau koneksi.")
         st.stop()
 
-    st.subheader("📄 Tabel Game")
-    st.dataframe(df_games)
+    # Metric animated feel
+    total_games = len(df_games)
+    unique_genres = df_games["genres"].dropna().str.split(", ").explode().nunique()
+    unique_platforms = df_games["platforms"].dropna().str.split(", ").explode().nunique()
 
-    # Top 10 rating
-    st.subheader("⭐ Top 10 Game berdasarkan Rating")
-    top_rating = df_games.sort_values("rating", ascending=False).head(10)
-    st.dataframe(top_rating[["name", "rating", "ratings_count", "metacritic", "genres", "platforms"]])
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Game (snapshot)", total_games)
+    m2.metric("Unique Genres", unique_genres)
+    m3.metric("Unique Platforms", unique_platforms)
 
-    fig1 = plot_bar(
-        x=top_rating.sort_values("rating")["name"],
-        y=top_rating.sort_values("rating")["rating"],
-        title="Top 10 Rating",
-        xlabel="Game",
-        ylabel="Rating",
-    )
-    st.pyplot(fig1)
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    tab1, tab2, tab3 = st.tabs(["📄 Tabel", "⭐ Rating & Genre", "🕹️ Platform"])
+    with tab1:
+        st.subheader("📄 Tabel Game")
+        st.dataframe(df_games)
+    with tab2:
+        st.subheader("⭐ Top 10 Game berdasarkan Rating")
+        top_rating = df_games.sort_values("rating", ascending=False).head(10)
+        st.dataframe(top_rating[["name", "rating", "ratings_count", "metacritic", "genres", "platforms"]])
 
-    # Genre distribusi
-    st.subheader("🎮 Distribusi Genre (dalam sampel ini)")
-    genres_exploded = df_games["genres"].dropna().str.split(", ").explode()
-    genre_counts = genres_exploded.value_counts().head(15)
-    st.write(genre_counts)
+        fig1 = plot_bar(
+            x=top_rating.sort_values("rating")["name"],
+            y=top_rating.sort_values("rating")["rating"],
+            title="Top 10 Rating",
+            xlabel="Game",
+            ylabel="Rating",
+        )
+        st.pyplot(fig1)
 
-    fig2 = plot_bar(
-        x=genre_counts.index,
-        y=genre_counts.values,
-        title="Top Genre di Daftar Trending/Populer",
-        xlabel="Genre",
-        ylabel="Jumlah Game",
-    )
-    st.pyplot(fig2)
+        st.subheader("🎮 Distribusi Genre (dalam sampel ini)")
+        genres_exploded = df_games["genres"].dropna().str.split(", ").explode()
+        genre_counts = genres_exploded.value_counts().head(15)
+        st.write(genre_counts)
 
-    # Platform distribusi
-    st.subheader("🕹️ Distribusi Platform")
-    plat_exploded = df_games["platforms"].dropna().str.split(", ").explode()
-    plat_counts = plat_exploded.value_counts().head(15)
-    st.write(plat_counts)
+        fig2 = plot_bar(
+            x=genre_counts.index,
+            y=genre_counts.values,
+            title="Top Genre di Daftar Trending/Populer",
+            xlabel="Genre",
+            ylabel="Jumlah Game",
+        )
+        st.pyplot(fig2)
 
-    fig3 = plot_bar(
-        x=plat_counts.index,
-        y=plat_counts.values,
-        title="Top Platform di Daftar Trending/Populer",
-        xlabel="Platform",
-        ylabel="Jumlah Game",
-    )
-    st.pyplot(fig3)
+    with tab3:
+        st.subheader("🕹️ Distribusi Platform")
+        plat_exploded = df_games["platforms"].dropna().str.split(", ").explode()
+        plat_counts = plat_exploded.value_counts().head(15)
+        st.write(plat_counts)
+
+        fig3 = plot_bar(
+            x=plat_counts.index,
+            y=plat_counts.values,
+            title="Top Platform di Daftar Trending/Populer",
+            xlabel="Platform",
+            ylabel="Jumlah Game",
+        )
+        st.pyplot(fig3)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ============ PAGE 2: PREDIKSI TREN (AI) ============
 
 elif page == "2️⃣ Prediksi Tren (AI)":
-    st.title("📈 Prediksi Tren Game (Regresi Linear Sederhana)")
+    st.markdown('<div class="glow-title"><h1>📈 AI Trend Prediction</h1></div>', unsafe_allow_html=True)
 
     st.markdown(
         """
-        Di halaman ini, kamu bisa:
-        - Upload file CSV hasil **snapshot berkala** (misalnya dari script polling RAWG di Colab).
-        - Pilih game tertentu.
-        - Model tren **rating** atau **ratings_count** terhadap waktu.
-        """
+        <div class="glass-card">
+        <h3>🤖 Regresi Linear Sederhana untuk Prediksi Tren</h3>
+        <p style="font-size:0.9rem; opacity:0.85;">
+        Upload CSV hasil snapshot berkala (misalnya dari Colab),
+        lalu pilih game dan metrik (<code>rating</code> / <code>ratings_count</code>)
+        untuk melihat tren historis dan prediksi ke depan.
+        </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     uploaded = st.file_uploader(
@@ -367,10 +507,10 @@ elif page == "2️⃣ Prediksi Tren (AI)":
 
     if uploaded is not None:
         df_rt = pd.read_csv(uploaded)
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.write("Contoh data:")
         st.dataframe(df_rt.head())
 
-        # Validasi kolom
         required_cols = {"name", "snapshot_time_utc", "rating", "ratings_count"}
         if not required_cols.issubset(df_rt.columns):
             st.error(f"CSV minimal harus punya kolom: {required_cols}")
@@ -390,25 +530,28 @@ elif page == "2️⃣ Prediksi Tren (AI)":
             df_game = df_game.sort_values("snapshot_time_utc")
             st.dataframe(df_game[["snapshot_time_utc", metric]])
 
-            # Plot historis
             fig_hist, ax = plt.subplots()
             ax.plot(df_game["snapshot_time_utc"], df_game[metric], marker="o")
-            ax.set_title(f"Historis {metric} untuk {game_choice}")
-            ax.set_xlabel("Waktu")
-            ax.set_ylabel(metric)
-            plt.xticks(rotation=45, ha="right")
+            ax.set_title(f"Historis {metric} untuk {game_choice}", color="#e5e7eb")
+            ax.set_xlabel("Waktu", color="#e5e7eb")
+            ax.set_ylabel(metric, color="#e5e7eb")
+            plt.xticks(rotation=45, ha="right", color="#e5e7eb")
+            ax.tick_params(colors="#e5e7eb")
+            fig_hist.patch.set_alpha(0.0)
+            ax.set_facecolor("none")
             plt.tight_layout()
             st.pyplot(fig_hist)
 
-            # Fit model
-            model, df_future = fit_linear_trend(df_game, "snapshot_time_utc", metric)
+            with st.spinner("Melatih model regresi & menghasilkan prediksi..."):
+                model, df_future = fit_linear_trend(df_game, "snapshot_time_utc", metric)
+                time.sleep(0.3)
+
             if model is None:
                 st.warning("Data terlalu sedikit / tidak variatif untuk model regresi.")
             else:
                 st.subheader("🤖 Prediksi 5 Titik ke Depan")
                 st.dataframe(df_future)
 
-                # Gabungkan untuk plot
                 df_future_plot = df_future.rename(columns={f"pred_{metric}": metric})
                 df_future_plot["type"] = "prediksi"
                 df_hist_plot = df_game[["snapshot_time_utc", metric]].copy()
@@ -429,13 +572,18 @@ elif page == "2️⃣ Prediksi Tren (AI)":
                         marker="o",
                         label=t_type,
                     )
-                ax2.set_title(f"Historis vs Prediksi {metric} untuk {game_choice}")
-                ax2.set_xlabel("Waktu")
-                ax2.set_ylabel(metric)
+                ax2.set_title(f"Historis vs Prediksi {metric} untuk {game_choice}", color="#e5e7eb")
+                ax2.set_xlabel("Waktu", color="#e5e7eb")
+                ax2.set_ylabel(metric, color="#e5e7eb")
                 ax2.legend()
-                plt.xticks(rotation=45, ha="right")
+                plt.xticks(rotation=45, ha="right", color="#e5e7eb")
+                ax2.tick_params(colors="#e5e7eb")
+                fig_trend.patch.set_alpha(0.0)
+                ax2.set_facecolor("none")
                 plt.tight_layout()
                 st.pyplot(fig_trend)
+
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.info("Upload CSV dulu supaya bisa bangun model tren.")
 
@@ -443,14 +591,19 @@ elif page == "2️⃣ Prediksi Tren (AI)":
 # ============ PAGE 3: SENTIMENT ANALYSIS REVIEW ============
 
 elif page == "3️⃣ Sentiment Analysis Review":
-    st.title("🗣️ Sentiment Analysis Review Game")
+    st.markdown('<div class="glow-title"><h1>🗣️ Sentiment Analysis Review Game</h1></div>', unsafe_allow_html=True)
 
     st.markdown(
         """
-        Pilihan input:
-        1. **Manual**: ketik / paste banyak review (1 review per baris).
-        2. **Scrape Steam**: masukkan Steam App ID (misalnya 730 untuk CS2).
-        """
+        <div class="glass-card">
+        <h3>Analisis Sentiment Review</h3>
+        <p style="font-size:0.9rem; opacity:0.85;">
+        Pilih input manual (paste review) atau ambil langsung dari Steam <b>(App ID)</b>.
+        Model VADER akan memberi label <code>positive / neutral / negative</code>.
+        </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     mode = st.radio(
@@ -479,22 +632,35 @@ elif page == "3️⃣ Sentiment Analysis Review":
             if not app_id:
                 st.warning("Isi App ID dulu.")
             else:
+                progress = st.progress(0, text="Mengambil review dari Steam...")
                 with st.spinner("Mengambil review dari Steam..."):
                     try:
+                        for i in range(1, 5):
+                            time.sleep(0.15)
+                            progress.progress(i * 20, text=f"Mengambil review... ({i*20}%)")
                         reviews_texts = fetch_steam_reviews(app_id, num=num)
+                        progress.progress(100, text="Done ✓")
+                        time.sleep(0.2)
+                        progress.empty()
                     except Exception as e:
+                        progress.empty()
                         st.error(f"Gagal ambil review: {e}")
 
     if reviews_texts:
         with st.spinner("Menghitung sentiment..."):
             df_sent = analyze_sentiment(reviews_texts)
+            time.sleep(0.25)
 
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         st.subheader("📄 Hasil Sentiment per Review")
         st.dataframe(df_sent)
 
         st.subheader("📊 Distribusi Sentiment")
         counts = df_sent["label"].value_counts()
-        st.write(counts)
+        col_p1, col_p2, col_p3 = st.columns(3)
+        col_p1.metric("Positive", int(counts.get("positive", 0)))
+        col_p2.metric("Neutral", int(counts.get("neutral", 0)))
+        col_p3.metric("Negative", int(counts.get("negative", 0)))
 
         fig_s, ax = plt.subplots()
         ax.pie(
@@ -503,6 +669,7 @@ elif page == "3️⃣ Sentiment Analysis Review":
             autopct="%1.1f%%",
         )
         ax.set_title("Proporsi Sentiment")
+        fig_s.patch.set_alpha(0.0)
         st.pyplot(fig_s)
 
         st.subheader("🔍 Contoh Review per Sentiment")
@@ -514,24 +681,27 @@ elif page == "3️⃣ Sentiment Analysis Review":
             else:
                 for _, row in sample.iterrows():
                     st.write(f"- {row['text']}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ============ PAGE 4: SCRAPER & KOMPETITOR (STEAM) ============
 
 elif page == "4️⃣ Scraper & Analisis Kompetitor (Steam)":
-    st.title("🏁 Scraper & Analisis Kompetitor Game (Steam)")
+    st.markdown('<div class="glow-title"><h1>🏁 Steam Competitor Intelligence</h1></div>', unsafe_allow_html=True)
 
     st.markdown(
         """
-        Di sini kita gunakan **Steam Web API appdetails + reviews** sebagai *scraper ringan*:
-
-        - Ambil info game (harga, discount, genre, metacritic, rekomendasi).
-        - Bandingkan beberapa game sebagai kompetitor.
-
-        ⚠️ **Catatan penting**:
-        - Selalu cek & patuhi Terms of Service dari platform (Steam, dll).
-        - Jangan melakukan scraping agresif / berlebihan.
-        """
+        <div class="glass-card">
+        <h3>Scraper Ringan + Analisis Kompetitor</h3>
+        <p style="font-size:0.9rem; opacity:0.85;">
+        Gunakan Steam <code>appdetails</code> & <code>reviews</code> untuk membandingkan:
+        harga, diskon, genre, dan rekomendasi (proxy popularitas).
+        <br><br>
+        ⚠️ <b>Catatan:</b> selalu patuhi Terms of Service Steam; gunakan scraping secara wajar.
+        </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     base_app_id = st.text_input(
@@ -553,29 +723,38 @@ elif page == "4️⃣ Scraper & Analisis Kompetitor (Steam)":
         if not app_ids:
             st.warning("Isi minimal 1 App ID.")
         else:
+            progress = st.progress(0, text="Mengambil data Steam...")
             with st.spinner("Mengambil data detail dari Steam..."):
+                for i in range(1, 5):
+                    time.sleep(0.15)
+                    progress.progress(i * 20, text=f"Mengambil data Steam... ({i*20}%)")
                 df_comp = collect_competitor_data(app_ids)
+                progress.progress(100, text="Done ✓")
+                time.sleep(0.2)
+                progress.empty()
 
             if df_comp.empty:
                 st.error("Tidak ada data kompetitor yang berhasil diambil.")
             else:
+                st.markdown('<div class="glass-card">', unsafe_allow_html=True)
                 st.subheader("📄 Data Kompetitor (Steam AppDetails)")
                 st.dataframe(df_comp)
 
-                # Harga (konversi ke satuan mata uang dasar)
                 st.subheader("💰 Perbandingan Harga & Diskon")
                 df_price = df_comp.copy()
                 df_price["price_final"] = df_price["price_final_cent"] / 100.0
                 st.dataframe(df_price[["name", "currency", "price_final", "discount_percent", "is_free"]])
 
                 fig_price, axp = plt.subplots()
-                # Hanya game yang punya harga
                 df_price_plot = df_price.dropna(subset=["price_final"])
                 if not df_price_plot.empty:
                     axp.bar(df_price_plot["name"], df_price_plot["price_final"])
-                    axp.set_title("Harga (final) per Game")
-                    axp.set_ylabel("Harga")
-                    axp.set_xticklabels(df_price_plot["name"], rotation=45, ha="right")
+                    axp.set_title("Harga (final) per Game", color="#e5e7eb")
+                    axp.set_ylabel("Harga", color="#e5e7eb")
+                    axp.set_xticklabels(df_price_plot["name"], rotation=45, ha="right", color="#e5e7eb")
+                    axp.tick_params(colors="#e5e7eb")
+                    fig_price.patch.set_alpha(0.0)
+                    axp.set_facecolor("none")
                     plt.tight_layout()
                     st.pyplot(fig_price)
                 else:
@@ -584,7 +763,6 @@ elif page == "4️⃣ Scraper & Analisis Kompetitor (Steam)":
                 st.subheader("🎯 Metacritic & Recommendations (proxy popularitas)")
                 st.dataframe(df_comp[["name", "metacritic_score", "recommendations", "genres"]])
 
-                # Scatter plot harga vs metacritic
                 if df_price_plot["metacritic_score"].notna().sum() > 1:
                     fig_sc, axsc = plt.subplots()
                     axsc.scatter(df_price_plot["price_final"], df_price_plot["metacritic_score"])
@@ -594,10 +772,14 @@ elif page == "4️⃣ Scraper & Analisis Kompetitor (Steam)":
                             row["metacritic_score"],
                             row["name"],
                             fontsize=8,
+                            color="#e5e7eb",
                         )
-                    axsc.set_xlabel("Harga final")
-                    axsc.set_ylabel("Metacritic score")
-                    axsc.set_title("Harga vs Kualitas (Metacritic)")
+                    axsc.set_xlabel("Harga final", color="#e5e7eb")
+                    axsc.set_ylabel("Metacritic score", color="#e5e7eb")
+                    axsc.set_title("Harga vs Kualitas (Metacritic)", color="#e5e7eb")
+                    axsc.tick_params(colors="#e5e7eb")
+                    fig_sc.patch.set_alpha(0.0)
+                    axsc.set_facecolor("none")
                     plt.tight_layout()
                     st.pyplot(fig_sc)
 
@@ -606,9 +788,15 @@ elif page == "4️⃣ Scraper & Analisis Kompetitor (Steam)":
 
                 st.markdown(
                     """
-                    👉 Kamu bisa:
-                    - Fokus ke kompetitor **F2P** vs **premium**.
-                    - Lihat genre apa yang paling sering muncul.
-                    - Gabungkan ini dengan sentiment review (Halaman 3) untuk insight yang lebih kaya.
-                    """
+                    <div style="font-size:0.9rem; opacity:0.85;">
+                    👉 Ide analisis lanjutan:
+                    <ul>
+                        <li>Kelompokkan kompetitor <b>F2P vs premium</b>.</li>
+                        <li>Lihat genre dominan dari kompetitor utama.</li>
+                        <li>Gabungkan dengan <b>sentiment review</b> (Halaman 3) untuk insight lebih dalam.</li>
+                    </ul>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
+                st.markdown("</div>", unsafe_allow_html=True)
