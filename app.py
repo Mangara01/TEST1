@@ -554,41 +554,32 @@ if page == "1️⃣ Market Overview (RAWG)":
         st.error("No data returned. Check your API key or connection.")
         st.stop()
 
-    # ----- Date filter by release date -----
+    # Prepare datetime column
     df_games["released_dt"] = pd.to_datetime(df_games["released"], errors="coerce")
-    valid_dates = df_games["released_dt"].dropna()
 
-    st.markdown("### Date Filter (by release date)")
+    st.markdown("### Date Filter (by release date - user input)")
 
-    if not valid_dates.empty:
-        min_date = valid_dates.min().date()
-        max_date = valid_dates.max().date()
+    start_str = st.text_input("Start release date (YYYY-MM-DD, optional)", "")
+    end_str = st.text_input("End release date (YYYY-MM-DD, optional)", "")
 
-        start_date, end_date = st.date_input(
-            "Select release date range",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-        )
+    df_view = df_games.copy()
 
-        if isinstance(start_date, datetime):
-            start_date = start_date.date()
-        if isinstance(end_date, datetime):
-            end_date = end_date.date()
-
-        mask = (df_games["released_dt"].dt.date >= start_date) & (
-            df_games["released_dt"].dt.date <= end_date
-        )
-        df_view = df_games.loc[mask].copy()
-    else:
-        st.info("No valid release dates found in the dataset; date filter is disabled.")
-        df_view = df_games.copy()
+    # Apply user-driven filter if provided
+    try:
+        if start_str:
+            start_date = pd.to_datetime(start_str).date()
+            df_view = df_view[df_view["released_dt"].dt.date >= start_date]
+        if end_str:
+            end_date = pd.to_datetime(end_str).date()
+            df_view = df_view[df_view["released_dt"].dt.date <= end_date]
+    except Exception:
+        st.warning("Invalid date format for release date filter. Use YYYY-MM-DD. Filter ignored.")
 
     st.subheader("Game Table (Filtered)")
     st.dataframe(df_view)
 
     if df_view.empty:
-        st.warning("No games fall inside the selected date range.")
+        st.warning("No games match the selected date range (or filters).")
         st.stop()
 
     # Top games by rating (after date filter)
@@ -656,7 +647,8 @@ elif page == "2️⃣ Trend Prediction (Snapshots from RAWG)":
         Workflow:
         1. Define the number of games and ordering.
         2. Click **“Capture new snapshot from RAWG”** multiple times over time (e.g., different days or hours).
-        3. Use the date filter, pick a game and metric, then view trend + forecast.
+        3. Use the **user-input date filter** to focus on a time window.
+        4. Select a game and metric, then view trend + forecast.
         """
     )
 
@@ -713,38 +705,29 @@ elif page == "2️⃣ Trend Prediction (Snapshots from RAWG)":
         st.error(f"Snapshot data is missing required columns: {required_cols}")
         st.stop()
 
-    # ----- Date filter on snapshot_time_utc -----
+    # Ensure datetime
     df_rt["snapshot_time_utc"] = pd.to_datetime(df_rt["snapshot_time_utc"], errors="coerce")
-    valid_dates = df_rt["snapshot_time_utc"].dropna()
 
-    st.markdown("### Date Filter (by snapshot_time_utc)")
+    st.markdown("### Date Filter (by snapshot_time_utc - user input)")
 
-    if not valid_dates.empty:
-        min_date = valid_dates.min().date()
-        max_date = valid_dates.max().date()
+    start_str = st.text_input("Start snapshot date (YYYY-MM-DD, optional)", "")
+    end_str = st.text_input("End snapshot date (YYYY-MM-DD, optional)", "")
 
-        start_date, end_date = st.date_input(
-            "Select snapshot date range",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date,
-        )
+    df_rt_filtered = df_rt.copy()
 
-        if isinstance(start_date, datetime):
-            start_date = start_date.date()
-        if isinstance(end_date, datetime):
-            end_date = end_date.date()
-
-        mask = (df_rt["snapshot_time_utc"].dt.date >= start_date) & (
-            df_rt["snapshot_time_utc"].dt.date <= end_date
-        )
-        df_rt_filtered = df_rt.loc[mask].copy()
-    else:
-        st.info("No valid snapshot dates found in the dataset; date filter is disabled.")
+    try:
+        if start_str:
+            start_date = pd.to_datetime(start_str).date()
+            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date >= start_date]
+        if end_str:
+            end_date = pd.to_datetime(end_str).date()
+            df_rt_filtered = df_rt_filtered[df_rt_filtered["snapshot_time_utc"].dt.date <= end_date]
+    except Exception:
+        st.warning("Invalid date format for snapshot filter. Use YYYY-MM-DD. Filter ignored.")
         df_rt_filtered = df_rt.copy()
 
     if df_rt_filtered.empty:
-        st.warning("No snapshot records fall inside the selected date range.")
+        st.warning("No snapshot records fall inside the selected user-defined date range.")
         st.stop()
 
     st.subheader("Filtered Snapshot Data (Used for Trend Modelling)")
@@ -935,12 +918,12 @@ elif page == "4️⃣ Competitor Analysis (Steam)":
                 st.dataframe(df_comp[["name", "metacritic_score", "recommendations", "genres"]])
 
                 # Scatter: price vs metacritic
-                if not df_price_plot.dropna(subset=["metaccritic_score"]).empty:
+                if not df_price_plot.dropna(subset=["metacritic_score"]).empty:
                     fig_sc, axsc = plt.subplots()
-                    dplot = df_price_plot.dropna(subset=["metaccritic_score"])
-                    axsc.scatter(dplot["price_final"], dplot["metaccritic_score"])
+                    dplot = df_price_plot.dropna(subset=["metacritic_score"])
+                    axsc.scatter(dplot["price_final"], dplot["metacritic_score"])
                     for _, row in dplot.iterrows():
-                        axsc.text(row["price_final"], row["metaccritic_score"], row["name"], fontsize=8)
+                        axsc.text(row["price_final"], row["metacritic_score"], row["name"], fontsize=8)
                     axsc.set_xlabel("Final Price")
                     axsc.set_ylabel("Metacritic Score")
                     axsc.set_title("Price vs Metacritic")
