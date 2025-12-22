@@ -1,8 +1,7 @@
 streamlit
-requests
 pandas
 numpy
 matplotlib
-scikit-learn
+google-play-scraper
 nltk
-openai
+scikit-learn
